@@ -1,0 +1,9 @@
+**/.ipynb_checkpoints
+**/*.pyc
+**/.swp
+miniplaces/data
+miniplaces/development_kit
+miniplaces/models
+miniplaces/preds.csv
+vqa/data
+vqa/VQA
