@@ -6,10 +6,17 @@ from tqdm import tnrange
 import time
 import os
 import sys
-from utils import tf_init, get_next_run_num
+from utils import tf_init, get_next_run_num, get_abs_path
+
+cnn_modules = {
+    'vgg16': tf.contrib.keras.applications.VGG16,
+    'xception': tf.contrib.keras.applications.Xception
+}
+
+miniplaces = get_abs_path('../miniplaces/')
 
 
-class VGG(object):
+class PretrainedCNN(object):
     """
     """
     def __init__(
@@ -18,7 +25,7 @@ class VGG(object):
         img_height       = 128,
         n_channels       = 3,
         n_classes        = None,
-        log_fname        = '/scratch/nhunt/cv/miniplaces/models/log.h5',
+        log_fname        = '{}/models/log.h5'.format(miniplaces),
         log_key          = 'default',
         data_params      = None,
         dense_nodes      = (128,),
@@ -31,10 +38,12 @@ class VGG(object):
         batch_size       = 64,
         record           = True,
         random_state     = 521,
-        dense_activation = tf.nn.relu
+        dense_activation = tf.nn.relu,
+        finetune         = False,
+        cnn_module       = 'vgg16'
     ):
         param_names = ['img_width', 'img_height', 'n_channels', 'n_classes', 'dense_nodes', 'l2_lambda', 'learning_rate',
-                       'beta1', 'beta2', 'random_state', 'batch_size', 'dense_activation']
+                       'beta1', 'beta2', 'random_state', 'batch_size', 'dense_activation', 'finetune', 'cnn_module']
 
         if config is None:
             config = tf_init()
@@ -42,7 +51,7 @@ class VGG(object):
             data_params = {}
 
         if run_num == -1:
-            self.run_num = get_next_run_num('/scratch/nhunt/cv/miniplaces/models/run_num.pkl')
+            self.run_num = get_next_run_num('{}/models/run_num.pkl'.format(miniplaces))
             assert type(n_classes) is not None
             self.img_height = img_height
             self.img_width = img_width
@@ -56,6 +65,8 @@ class VGG(object):
             self.random_state = random_state
             self.batch_size = batch_size
             self.dense_activation = dense_activation
+            self.finetune = finetune
+            self.cnn_module = cnn_module
         else:
             self.run_num = run_num
             log = pd.read_hdf(log_fname, log_key)
@@ -71,7 +82,7 @@ class VGG(object):
         self.params.update({param: self.__getattribute__(param) for param in param_names})
 
         if record:
-            self.log_dir = '/scratch/nhunt/cv/miniplaces/models/{}/'.format(self.run_num)
+            self.log_dir = '{}/models/{}/'.format(miniplaces, self.run_num)
             try:
                 os.makedirs(self.log_dir)
             except OSError: # already exists if loading saved model
@@ -113,7 +124,8 @@ class VGG(object):
 #             self.inputs, self.labels = iterator.get_next()
             
             with tf.variable_scope('cnn'):
-                cnn_out = tf.contrib.keras.applications.VGG16(include_top=False, input_tensor=self.inputs_p).output
+                cnn = cnn_modules[self.cnn_module]
+                cnn_out = cnn(include_top=False, input_tensor=self.inputs_p).output
                 hidden = tf.contrib.layers.flatten(cnn_out)
             
             with tf.variable_scope('dense'):
@@ -128,8 +140,10 @@ class VGG(object):
                 self.loss_op = tf.add(self.loss_op, self.l2_lambda * tf.reduce_sum([tf.nn.l2_loss(var) for var in tf.trainable_variables()]), name='loss')
 
             trainable_vars = self.graph.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
-            if False: # TODO: make param
+
+            if not self.finetune: # don't finetune CNN layers
                 trainable_vars = filter(lambda tensor: not tensor.name.startswith('cnn'), trainable_vars)
+            
             self.optimizer = tf.train.AdamOptimizer(self.learning_rate, self.beta1, self.beta2)
             self.train_op = self.optimizer.minimize(self.loss_op, var_list=trainable_vars, name='train_op')
 
