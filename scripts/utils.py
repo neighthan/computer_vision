@@ -4,6 +4,7 @@ import os
 import subprocess
 import cPickle as pickle
 import tensorflow as tf
+import numpy as np
 from PIL import Image
 from PIL import PngImagePlugin
 
@@ -73,6 +74,29 @@ def tf_init(device=''):
     config.gpu_options.allow_growth = True
     config.allow_soft_placement = True
     return config
+
+
+def load_data(task):
+    if task == 'miniplaces':
+        return _load_data_miniplaces()
+    elif task == 'vqa':
+        return _load_data_vqa()
+    assert False, 'task must be one of \{miniplaces, vqa\}, not {}.'.format(task)
+
+
+def _load_data_miniplaces():
+    miniplaces = get_abs_path('../miniplaces/')
+
+    train_inputs = np.load('{}/data/images/train.npy'.format(miniplaces))
+    train_labels = np.load('{}/data/images/train_labels.npy'.format(miniplaces))
+    val_inputs = np.load('{}/data/images/val.npy'.format(miniplaces))
+    val_labels = np.load('{}/data/images/val_labels.npy'.format(miniplaces))
+    test_inputs = np.load('{}/data/images/test.npy'.format(miniplaces))
+    return train_inputs, train_labels, val_inputs, val_labels, test_inputs
+
+
+def _load_data_vqa():
+    raise NotImplemented
 
 
 def add_metadata_to_img(fname, metadata):

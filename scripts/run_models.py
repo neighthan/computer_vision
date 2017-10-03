@@ -2,32 +2,11 @@
 
 from __future__ import print_function, division, absolute_import
 import itertools
-
-import os
-import sys
-#sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models import PretrainedCNN
-from utils import get_abs_path
 import numpy as np
-
 import argparse
-
-miniplaces = get_abs_path('../miniplaces/')
-
-def load_data(task):
-    if task == 'miniplaces':
-        return _load_data_miniplaces()
-    elif task == 'vqa':
-        pass
-    assert False, 'task must be one of \{miniplaces, vqa\}, not {}.'.format(task)
-
-def _load_data_miniplaces():
-    train_inputs = np.load('{}/data/images/train.npy'.format(miniplaces))
-    train_labels = np.load('{}/data/images/train_labels.npy'.format(miniplaces))
-    val_inputs = np.load('{}/data/images/val.npy'.format(miniplaces))
-    val_labels = np.load('{}/data/images/val_labels.npy'.format(miniplaces))
-    test_inputs = np.load('{}/data/images/test.npy'.format(miniplaces))
-    return train_inputs, train_labels, val_inputs, val_labels, test_inputs
+import os
+from utils import load_data
 
 
 if __name__ == "__main__":
