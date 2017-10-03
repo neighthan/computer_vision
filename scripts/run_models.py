@@ -7,7 +7,7 @@ import numpy as np
 import argparse
 import os
 import sys
-from utils import load_data
+from utils import load_data, tf_init
 
 
 if __name__ == "__main__":
@@ -18,7 +18,7 @@ if __name__ == "__main__":
     # start will be kept. [default = 3]", default=3)
     parser.add_argument('-t', '--task', help="Which task to predict on (one of miniplaces or vqa).", required=True)
     parser.add_argument('-bs', '--batch_size', type=int, default=64, help="Batch size for model training. [default = 64]")
-    #parser.add_argument('-d', '--device', type=int, help="The number of the GPU to use [default = most memory free]")
+    parser.add_argument('-d', '--device', default='', help="The number of the GPU to use [default = most memory free]")
     parser.add_argument('-hn', '--hidden_nodes', nargs='+', required=True, help="How many hidden nodes to use in the dense layer(s).\
     Specifying more than one number causes multiple layers to be used.", type=int, action='append')
     #parser.add_argument('-ln', '--log_notes', help="Additional notes to put in the log. You can use this, e.g., to make it\
@@ -37,6 +37,7 @@ if __name__ == "__main__":
     if args.test:
         sys.exit()
     
+    config = tf_init(args.device)
     train_inputs, train_labels, val_inputs, val_labels, test_inputs = load_data(args.task)
     n_classes = len(np.unique(train_labels))
 
@@ -51,7 +52,7 @@ if __name__ == "__main__":
     while True:
         try:
             params = all_params.next()
-            hidden_nodes = params
+            hidden_nodes = params[0]
             print("Using params:", params)
         except StopIteration:
             break
@@ -68,7 +69,7 @@ if __name__ == "__main__":
         #    print("On attempt", attempt_num)
 
         cnn = PretrainedCNN(n_classes=n_classes, dense_nodes=hidden_nodes, batch_size=args.batch_size, log_key=args.key,
-                           finetune=args.finetune, cnn_module=args.cnn)
+                           finetune=args.finetune, cnn_module=args.cnn, config=config)
         cnn.train(train_inputs, train_labels, val_inputs, val_labels, verbose=True)
 
             # val_aucs.append(dev_auc)
