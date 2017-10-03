@@ -16,57 +16,33 @@ cnn_modules = {
 miniplaces = get_abs_path('../miniplaces/')
 
 
-class PretrainedCNN(object):
+class BaseNN(object):
     """
+    This class implements several methods that may be used by neural networks in general. It doesn't actually create any
+    layers, so it shouldn't be used directly.
+    Currently, this class only works for classification, not regression.
     """
     def __init__(
         self,
-        img_width        = 128,
-        img_height       = 128,
-        n_channels       = 3,
-        n_classes        = None,
         log_fname        = '{}/models/log.h5'.format(miniplaces),
         log_key          = 'default',
-        data_params      = None,
-        dense_nodes      = (128,),
-        l2_lambda        = None,
-        learning_rate    = 0.001,
-        beta1            = 0.9,
-        beta2            = 0.999,
         config           = None,
         run_num          = -1,
-        batch_size       = 64,
+        batch_size       = 128,
         record           = True,
-        random_state     = 521,
-        dense_activation = tf.nn.relu,
-        finetune         = False,
-        cnn_module       = 'vgg16'
+        random_state     = 521
     ):
-        param_names = ['img_width', 'img_height', 'n_channels', 'n_classes', 'dense_nodes', 'l2_lambda', 'learning_rate',
-                       'beta1', 'beta2', 'random_state', 'batch_size', 'dense_activation', 'finetune', 'cnn_module']
+        # don't include run_num or config
+        param_names = ['random_state', 'batch_size', 'record']
 
         if config is None:
             config = tf_init()
-        if data_params is None:
-            data_params = {}
 
         if run_num == -1:
-            self.run_num = get_next_run_num('{}/models/run_num.pkl'.format(miniplaces))
-            assert type(n_classes) is not None
-            self.img_height = img_height
-            self.img_width = img_width
-            self.n_channels = n_channels
-            self.n_classes = n_classes
-            self.dense_nodes = dense_nodes
-            self.l2_lambda = l2_lambda
-            self.learning_rate = learning_rate
-            self.beta1 = beta1
-            self.beta2 = beta2
+            self.run_num      = get_next_run_num('{}/models/run_num.pkl'.format(miniplaces))
             self.random_state = random_state
-            self.batch_size = batch_size
-            self.dense_activation = dense_activation
-            self.finetune = finetune
-            self.cnn_module = cnn_module
+            self.batch_size   = batch_size
+            self.record       = record
         else:
             self.run_num = run_num
             log = pd.read_hdf(log_fname, log_key)
@@ -75,11 +51,9 @@ class PretrainedCNN(object):
                 self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
 
         self.config    = config
-        self.record    = record
         self.log_fname = log_fname
         self.log_key   = log_key
-        self.params    = data_params.copy()
-        self.params.update({param: self.__getattribute__(param) for param in param_names})
+        self.params    = {param: self.__getattribute__(param) for param in param_names}
 
         if record:
             self.log_dir = '{}/models/{}/'.format(miniplaces, self.run_num)
@@ -93,9 +67,6 @@ class PretrainedCNN(object):
         tf.set_random_seed(self.random_state)
         np.random.seed(self.random_state)
 
-        self.__build_graph__()
-
-
     def __build_graph__(self):
         """
         If self.log_dir contains a previously trained model, then the graph from that run is loaded for further
@@ -105,72 +76,32 @@ class PretrainedCNN(object):
         :returns: None
         """
 
-        meta_graph_file = os.path.join(self.log_dir, 'model.ckpt.meta')
         self.graph = tf.Graph()
-        self.sess = tf.Session(config=self.config, graph=self.graph)
-
-        with self.graph.as_default(), self.sess.as_default():
-            self.inputs_p = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p')
-            self.labels_p = tf.placeholder(tf.int32, shape=None, name='labels_p')
-            self.onehot_labels = tf.one_hot(self.labels_p, depth=self.n_classes, name='onehot_labels')
-
-#             data = tf.contrib.data.Dataset.from_tensor_slices((self.inputs_p, self.labels_p))
-            
-#             self.data = data.batch(self.batch_size)
-
-#             iterator = tf.contrib.data.Iterator.from_structure(self.data.output_types, self.data.output_shapes)
-#             self.data_init_op = iterator.make_initializer(self.data)
-
-#             self.inputs, self.labels = iterator.get_next()
-            
-            with tf.variable_scope('cnn'):
-                cnn = cnn_modules[self.cnn_module]
-                cnn_out = cnn(include_top=False, input_tensor=self.inputs_p).output
-                hidden = tf.contrib.layers.flatten(cnn_out)
-            
-            with tf.variable_scope('dense'):
-                for i in range(len(self.dense_nodes)):
-                    hidden = tf.layers.dense(hidden, self.dense_nodes[i], activation=self.dense_activation, name='dense_{}'.format(i))
-                self.logits = tf.layers.dense(hidden, self.n_classes, activation=None, name='logits')
-
-            self.predict = tf.nn.softmax(self.logits, name='predict')
-            self.loss_op = tf.losses.softmax_cross_entropy(self.onehot_labels, self.logits, scope='xent')
-
-            if self.l2_lambda:
-                self.loss_op = tf.add(self.loss_op, self.l2_lambda * tf.reduce_sum([tf.nn.l2_loss(var) for var in tf.trainable_variables()]), name='loss')
-
-            trainable_vars = self.graph.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
-
-            if not self.finetune: # don't finetune CNN layers
-                trainable_vars = filter(lambda tensor: not tensor.name.startswith('cnn'), trainable_vars)
-            
-            self.optimizer = tf.train.AdamOptimizer(self.learning_rate, self.beta1, self.beta2)
-            self.train_op = self.optimizer.minimize(self.loss_op, var_list=trainable_vars, name='train_op')
-
-            self.probs_p = tf.placeholder(tf.float32, shape=(None, self.n_classes), name='probs_p')
-            self.accuracy1 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=1), tf.float32))
-            self.accuracy5 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=5), tf.float32))
-
+        with self.graph.as_default():
             self.saver = tf.train.Saver()
             self.global_init = tf.global_variables_initializer()
 
+        self.__add_savers_and_writers__()
+    
+    def __add_savers_and_writers__(self):
         if self.log_dir != '':
             with self.graph.as_default():
-                self.train_writer = tf.summary.FileWriter(os.path.join(self.log_dir, 'train'), self.graph,
-                                                          flush_secs=30)
-                self.dev_writer = tf.summary.FileWriter(os.path.join(self.log_dir, 'dev'), self.graph,
-                                                        flush_secs=30)
+                self.train_writer = tf.summary.FileWriter(os.path.join(self.log_dir, 'train'), self.graph, flush_secs=30)
+                self.dev_writer = tf.summary.FileWriter(os.path.join(self.log_dir, 'dev'), self.graph, flush_secs=30)
                 for var in tf.trainable_variables():
                     tf.summary.histogram(var.name, var)
                 self.summary_op = tf.summary.merge_all()
 
+        self.sess = tf.Session(graph=self.graph, config=self.config)
+        
+        meta_graph_file = os.path.join(self.log_dir, 'model.ckpt.meta')
         if os.path.isfile(meta_graph_file):  # load saved model
             print("Loading graph from:", meta_graph_file)
             saver = tf.train.import_meta_graph(meta_graph_file)
             saver.restore(self.sess, os.path.join(self.log_dir, 'model.ckpt'))
         else:
             self.sess.run(self.global_init)
-
+    
     def predict_proba(self, inputs):
         """
         Generates predictions (predicted 'probabilities', not binary labels) on the test set
@@ -204,13 +135,10 @@ class PretrainedCNN(object):
     def train(self, train_inputs, train_labels, dev_inputs, dev_labels, n_epochs=100, max_patience=5, in_notebook=False,
              verbose=False):
         start_time = time.time()
-        
-        train_labels = train_labels.astype(np.int32)
-        dev_labels = dev_labels.astype(np.int32)
 
         if in_notebook:
             epoch_range = lambda *args: tnrange(*args, unit='epoch')
-            batch_range = lambda *args: tnrange(*args, unit='batch', leave=False)            
+            batch_range = lambda *args: tnrange(*args, unit='batch', leave=False)
         else:
             epoch_range = range
             batch_range = range
@@ -234,7 +162,7 @@ class PretrainedCNN(object):
                 loss, _ = self.sess.run([self.loss_op, self.train_op], {self.inputs_p: train_inputs[batch_idx],
                                                                        self.labels_p: train_labels[batch_idx]})
                 train_loss.append(loss)
-            
+
 #             self.sess.run(self.data_init_op, {self.inputs_p: dev_inputs, self.labels_p: dev_labels})
             dev_loss = []
             for batch in batch_range(dev_batches_per_epoch):
@@ -301,3 +229,235 @@ class PretrainedCNN(object):
         probs = self.predict_proba(inputs)
         return self.sess.run([self.accuracy1, self.accuracy5], {self.probs_p: probs, self.labels_p: labels})
 
+
+class PretrainedCNN(BaseNN):
+    """
+    """
+    def __init__(
+        self,
+        img_width        = 128,
+        img_height       = 128,
+        n_channels       = 3,
+        n_classes        = None,
+        log_fname        = '{}/models/log.h5'.format(miniplaces),
+        log_key          = 'default',
+        data_params      = None,
+        dense_nodes      = (128,),
+        l2_lambda        = None,
+        learning_rate    = 0.001,
+        beta1            = 0.9,
+        beta2            = 0.999,
+        config           = None,
+        run_num          = -1,
+        batch_size       = 64,
+        record           = True,
+        random_state     = 521,
+        dense_activation = tf.nn.relu,
+        finetune         = False,
+        cnn_module       = 'vgg16'
+    ):
+        new_run = run_num == -1
+        super(PretrainedCNN, self).__init__(log_fname, log_key, config, run_num, batch_size, record, random_state)
+
+        param_names = ['img_width', 'img_height', 'n_channels', 'n_classes', 'dense_nodes', 'l2_lambda', 'learning_rate',
+                       'beta1', 'beta2', 'dense_activation', 'finetune', 'cnn_module']
+
+        if data_params is None:
+            data_params = {}
+
+        if new_run:
+            assert type(n_classes) is not None
+            self.img_height = img_height
+            self.img_width = img_width
+            self.n_channels = n_channels
+            self.n_classes = n_classes
+            self.dense_nodes = dense_nodes
+            self.l2_lambda = l2_lambda
+            self.learning_rate = learning_rate
+            self.beta1 = beta1
+            self.beta2 = beta2
+            self.dense_activation = dense_activation
+            self.finetune = finetune
+            self.cnn_module = cnn_module
+        else:
+            log = pd.read_hdf(log_fname, log_key)
+            for param in param_names:
+                p = log.loc[run_num, param]
+                self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
+
+        self.params.update(data_params)
+        self.params.update({param: self.__getattribute__(param) for param in param_names})
+        
+        self.__build_graph__()
+
+    def __build_graph__(self):
+        """
+        If self.log_dir contains a previously trained model, then the graph from that run is loaded for further
+        training/inference. Otherwise, a new graph is built.
+        Also starts a session with self.graph.
+        If self.log_dir != '' then a Saver and summary writers are also created.
+        :returns: None
+        """
+
+        meta_graph_file = os.path.join(self.log_dir, 'model.ckpt.meta')
+        self.graph = tf.Graph()
+        self.sess = tf.Session(config=self.config, graph=self.graph)
+
+        with self.graph.as_default(), self.sess.as_default():
+            self.inputs_p = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p')
+            self.labels_p = tf.placeholder(tf.int32, shape=None, name='labels_p')
+            self.onehot_labels = tf.one_hot(self.labels_p, depth=self.n_classes, name='onehot_labels')
+
+#             data = tf.contrib.data.Dataset.from_tensor_slices((self.inputs_p, self.labels_p))
+            
+#             self.data = data.batch(self.batch_size)
+
+#             iterator = tf.contrib.data.Iterator.from_structure(self.data.output_types, self.data.output_shapes)
+#             self.data_init_op = iterator.make_initializer(self.data)
+
+#             self.inputs, self.labels = iterator.get_next()
+            
+            with tf.variable_scope('cnn'):
+                cnn = cnn_modules[self.cnn_module]
+                cnn_out = cnn(include_top=False, input_tensor=self.inputs_p).output
+                hidden = tf.contrib.layers.flatten(cnn_out)
+            
+            with tf.variable_scope('dense'):
+                for i in range(len(self.dense_nodes)):
+                    hidden = tf.layers.dense(hidden, self.dense_nodes[i], activation=self.dense_activation, name='dense_{}'.format(i))
+                self.logits = tf.layers.dense(hidden, self.n_classes, activation=None, name='logits')
+
+            self.predict = tf.nn.softmax(self.logits, name='predict')
+            self.loss_op = tf.losses.sparse_softmax_cross_entropy(self.labels_p, self.logits, scope='xent')
+#             self.loss_op = tf.losses.softmax_cross_entropy(self.onehot_labels, self.logits, scope='xent')
+
+            if self.l2_lambda:
+                self.loss_op = tf.add(self.loss_op, self.l2_lambda * tf.reduce_sum([tf.nn.l2_loss(var) for var in tf.trainable_variables()]), name='loss')
+
+            trainable_vars = self.graph.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+
+            if not self.finetune: # don't finetune CNN layers
+                trainable_vars = filter(lambda tensor: not tensor.name.startswith('cnn'), trainable_vars)
+            
+            self.optimizer = tf.train.AdamOptimizer(self.learning_rate, self.beta1, self.beta2)
+            self.train_op = self.optimizer.minimize(self.loss_op, var_list=trainable_vars, name='train_op')
+
+            self.probs_p = tf.placeholder(tf.float32, shape=(None, self.n_classes), name='probs_p')
+            self.accuracy1 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=1), tf.float32))
+            self.accuracy5 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=5), tf.float32))
+
+            self.saver = tf.train.Saver()
+            self.global_init = tf.global_variables_initializer()
+        self.__add_savers_and_writers__()
+
+
+class CNN(BaseNN):
+    """
+    """
+    def __init__(
+        self,
+        img_width        = 128,
+        img_height       = 128,
+        n_channels       = 3,
+        n_classes        = None,
+        log_fname        = '../models/log.h5',
+        log_key          = 'default',
+        data_params      = None,
+        cnn_nodes       = (256,),
+        dense_nodes      = (128,),
+        l2_lambda        = None,
+        learning_rate    = 0.001,
+        beta1            = 0.9,
+        beta2            = 0.999,
+        config           = None,
+        run_num          = -1,
+        batch_size       = 128,
+        record           = True,
+        random_state     = 521,
+        dense_activation = tf.nn.relu
+    ):
+        new_run = run_num == -1
+        super(CNN, self).__init__(log_fname, log_key, config, run_num, batch_size, record, random_state)
+
+        param_names = ['img_width', 'img_height', 'n_channels', 'n_classes', 'cnn_nodes', 'dense_nodes', 'l2_lambda', 'learning_rate',
+                       'beta1', 'beta2', 'random_state', 'batch_size', 'dense_activation']
+
+        if data_params is None:
+            data_params = {}
+
+        if new_run:
+            assert type(n_classes) is not None
+            self.img_height = img_height
+            self.img_width = img_width
+            self.n_channels = n_channels
+            self.n_classes = n_classes
+            self.cnn_nodes = cnn_nodes
+            self.dense_nodes = dense_nodes
+            self.l2_lambda = l2_lambda
+            self.learning_rate = learning_rate
+            self.beta1 = beta1
+            self.beta2 = beta2
+            self.dense_activation = dense_activation
+        else:
+            log = pd.read_hdf(log_fname, log_key)
+            for param in param_names:
+                p = log.loc[run_num, param]
+                self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
+
+        self.params.update(data_params)
+        self.params.update({param: self.__getattribute__(param) for param in param_names})
+
+        self.__build_graph__()
+
+
+    def __build_graph__(self):
+        """
+        If self.log_dir contains a previously trained model, then the graph from that run is loaded for further
+        training/inference. Otherwise, a new graph is built.
+        Also starts a session with self.graph.
+        If self.log_dir != '' then a Saver and summary writers are also created.
+        :returns: None
+        """
+
+        meta_graph_file = os.path.join(self.log_dir, 'model.ckpt.meta')
+        self.graph = tf.Graph()
+        with self.graph.as_default():
+            self.inputs_p = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p')
+            self.labels_p = tf.placeholder(tf.float32, shape=(None, self.n_classes), name='labels_p')
+
+#             data = tf.contrib.data.Dataset.from_tensor_slices((self.inputs_p, self.labels_p))
+            
+#             self.data = data.batch(self.batch_size)
+
+#             iterator = tf.contrib.data.Iterator.from_structure(self.data.output_types, self.data.output_shapes)
+#             self.data_init_op = iterator.make_initializer(self.data)
+
+#             self.inputs, self.labels = iterator.get_next()
+            
+            hidden = self.inputs_p
+            
+            with tf.variable_scope('cnn'):
+                for i in range(len(self.cnn_nodes)):
+                    hidden = tf.layers.conv2d(hidden, self.cnn_nodes[i], kernel_size=3, activation=tf.nn.relu, padding='same', name='conv_{}'.format(i))
+                    hidden = tf.layers.max_pooling2d(hidden, 2, 2, padding='same', name='max_pool_{}'.format(i))
+
+                n_features = self.img_height / 2 ** len(self.cnn_nodes) * self.img_width / 2 ** len(self.cnn_nodes) * self.cnn_nodes[-1]
+                hidden = tf.contrib.layers.flatten(hidden)
+            
+            with tf.variable_scope('dense'):
+                for i in range(len(self.dense_nodes)):
+                    hidden = tf.layers.dense(hidden, self.dense_nodes[i], activation=self.dense_activation, name='dense_{}'.format(i))
+                self.logits = tf.layers.dense(hidden, self.n_classes, activation=None, name='logits')
+
+            self.predict = tf.nn.softmax(self.logits, name='predict')
+            self.loss_op = tf.losses.softmax_cross_entropy(self.labels_p, self.logits, scope='xent')
+
+            if self.l2_lambda:
+                self.loss_op = tf.add(self.loss_op, self.l2_lambda * tf.reduce_sum([tf.nn.l2_loss(var) for var in tf.trainable_variables()]), name='loss')
+
+            self.train_op = tf.train.AdamOptimizer(self.learning_rate, self.beta1, self.beta2).minimize(self.loss_op, name='train_op')
+
+            self.saver = tf.train.Saver()
+            self.global_init = tf.global_variables_initializer()
+
+        self.__add_savers_and_writers__()
