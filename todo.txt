@@ -1,0 +1,19 @@
+Miniplaces
+* add parameter to PretrainedCNN to not load the imagenet weights. Make sure not to use the pretrained weights for this competition, though we can use them again on the project.
+* have tnrange write the loss for each batch
+* Look at dilated convolution (large kernels w/ small # parameters)
+* Try turning on the pooling after the CNN modules (for the pretrained ones)
+* Dataset augmentation
+* need to make images at least 197x197 if we want to try keras.ResNet50
+* Make named models instead of run_num? It would be nicer in tensorboard
+* Make dense_activation a string instead of a function, like cnn_module
+* Add visualizations of the trained network
+* What is tf.nn.local_response_normalization? Similar to batch norm?
+* Look at SDD for object detection; we'd need to train it from scratch, though. See what their data augmentation methods were; these apparently helped.
+* Try to use Dataset?
+* If reloading a model, when you call train, early_stop_loss should be set to the dev_loss that was stored in the log. Otherwise, you'll end up always saving the model after the first training iteration, even if that was worse than the previously saved one.
+
+
+
+VQA
+* Try to train the dense layers fully then retrain with finetuning
