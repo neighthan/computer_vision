@@ -6,6 +6,7 @@ from models import PretrainedCNN
 import numpy as np
 import argparse
 import os
+import sys
 from utils import load_data
 
 
@@ -24,6 +25,8 @@ if __name__ == "__main__":
     #easy to identify this set of runs by specifying a note not used elsewhere.", default='')
     parser.add_argument('-f', '--finetune', help="Whether to finetune the CNN layers of a network with a pretrained CNN",
                         action='store_true')
+    parser.add_argument('-c', '--cnn', help='Which pretrained CNN module to use (vgg16 or xception) [default = vgg16]',
+                       default='vgg16')
     parser.add_argument('--test', help="If this flag is given, the arguments are printed and then the script exits. This can be\
     used if you need to make sure your arguments are properly formatted.", action="store_true")
     parser.add_argument('-k', '--key', default='default', help='Key to use in the HDF5 log file when these models are saved.')
@@ -38,7 +41,7 @@ if __name__ == "__main__":
     n_classes = len(np.unique(train_labels))
 
     # define combinations: one model will be run for each of these
-    all_params = itertools.product(*args.hidden_nodes)
+    all_params = itertools.product(args.hidden_nodes)
 
     # next params to use; the ones that, e.g., caused an error before
     # set checkpoint_reached to True if not using this
@@ -65,7 +68,7 @@ if __name__ == "__main__":
         #    print("On attempt", attempt_num)
 
         cnn = PretrainedCNN(n_classes=n_classes, dense_nodes=hidden_nodes, batch_size=args.batch_size, log_key=args.key,
-                           finetune=args.finetune)
+                           finetune=args.finetune, cnn_module=args.cnn)
         cnn.train(train_inputs, train_labels, val_inputs, val_labels, verbose=True)
 
             # val_aucs.append(dev_auc)
