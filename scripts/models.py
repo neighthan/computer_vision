@@ -254,13 +254,17 @@ class PretrainedCNN(BaseNN):
         random_state     = 521,
         dense_activation = tf.nn.relu,
         finetune         = False,
+        pretrained_weights = False,
         cnn_module       = 'vgg16'
     ):
         new_run = run_num == -1
         super(PretrainedCNN, self).__init__(log_fname, log_key, config, run_num, batch_size, record, random_state)
 
         param_names = ['img_width', 'img_height', 'n_channels', 'n_classes', 'dense_nodes', 'l2_lambda', 'learning_rate',
-                       'beta1', 'beta2', 'dense_activation', 'finetune', 'cnn_module']
+                       'beta1', 'beta2', 'dense_activation', 'finetune', 'cnn_module', 'pretrained_weights']
+
+        if not pretrained_weights:
+            finetune = True
 
         if data_params is None:
             data_params = {}
@@ -279,6 +283,7 @@ class PretrainedCNN(BaseNN):
             self.dense_activation = dense_activation
             self.finetune = finetune
             self.cnn_module = cnn_module
+            self.pretrained_weights = pretrained_weights
         else:
             log = pd.read_hdf(log_fname, log_key)
             for param in param_names:
@@ -318,8 +323,13 @@ class PretrainedCNN(BaseNN):
 #             self.inputs, self.labels = iterator.get_next()
             
             with tf.variable_scope('cnn'):
+                if self.pretrained_weights:
+                    weights = 'imagenet'
+                else:
+                    weights = None
+
                 cnn = cnn_modules[self.cnn_module]
-                cnn_out = cnn(include_top=False, input_tensor=self.inputs_p).output
+                cnn_out = cnn(include_top=False, input_tensor=self.inputs_p, weights=weights).output
                 hidden = tf.contrib.layers.flatten(cnn_out)
             
             with tf.variable_scope('dense'):

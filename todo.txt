@@ -1,5 +1,4 @@
 Miniplaces
-* add parameter to PretrainedCNN to not load the imagenet weights. Make sure not to use the pretrained weights for this competition, though we can use them again on the project.
 * have tnrange write the loss for each batch
 * Look at dilated convolution (large kernels w/ small # parameters)
 * Try turning on the pooling after the CNN modules (for the pretrained ones)
@@ -12,7 +11,7 @@ Miniplaces
 * Look at SDD for object detection; we'd need to train it from scratch, though. See what their data augmentation methods were; these apparently helped.
 * Try to use Dataset?
 * If reloading a model, when you call train, early_stop_loss should be set to the dev_loss that was stored in the log. Otherwise, you'll end up always saving the model after the first training iteration, even if that was worse than the previously saved one.
-
+* Plot loss more often than once/epoch? Instantaneous loss for that batch? What about dev loss? For a random sample of the dev data? But only use the loss at the end of an epoch for early stopping?
 
 
 VQA
