@@ -300,3 +300,4 @@ class PretrainedCNN(object):
 #         self.sess.run([self.data_init_op], {self.inputs_p: inputs, self.labels_p: labels})
         probs = self.predict_proba(inputs)
         return self.sess.run([self.accuracy1, self.accuracy5], {self.probs_p: probs, self.labels_p: labels})
+
