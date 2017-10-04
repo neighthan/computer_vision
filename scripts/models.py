@@ -143,8 +143,7 @@ class BaseNN(object):
             epoch_range = range
             batch_range = range
 
-        early_stop_loss = np.inf
-        best_dev_loss = np.inf
+        best_train_loss = early_stop_loss = best_dev_loss = np.inf
         best_epoch = 0
         patience = max_patience
         train_batches_per_epoch = int(np.ceil(len(train_inputs) / self.batch_size))
@@ -433,7 +432,7 @@ class CNN(BaseNN):
         self.graph = tf.Graph()
         with self.graph.as_default():
             self.inputs_p = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p')
-            self.labels_p = tf.placeholder(tf.float32, shape=(None, self.n_classes), name='labels_p')
+            self.labels_p = tf.placeholder(tf.int32, shape=None, name='labels_p')
 
 #             data = tf.contrib.data.Dataset.from_tensor_slices((self.inputs_p, self.labels_p))
             
@@ -451,7 +450,6 @@ class CNN(BaseNN):
                     hidden = tf.layers.conv2d(hidden, self.cnn_nodes[i], kernel_size=3, activation=tf.nn.relu, padding='same', name='conv_{}'.format(i))
                     hidden = tf.layers.max_pooling2d(hidden, 2, 2, padding='same', name='max_pool_{}'.format(i))
 
-                n_features = self.img_height / 2 ** len(self.cnn_nodes) * self.img_width / 2 ** len(self.cnn_nodes) * self.cnn_nodes[-1]
                 hidden = tf.contrib.layers.flatten(hidden)
             
             with tf.variable_scope('dense'):
@@ -460,7 +458,7 @@ class CNN(BaseNN):
                 self.logits = tf.layers.dense(hidden, self.n_classes, activation=None, name='logits')
 
             self.predict = tf.nn.softmax(self.logits, name='predict')
-            self.loss_op = tf.losses.softmax_cross_entropy(self.labels_p, self.logits, scope='xent')
+            self.loss_op = tf.losses.sparse_softmax_cross_entropy(self.labels_p, self.logits, scope='xent')
 
             if self.l2_lambda:
                 self.loss_op = tf.add(self.loss_op, self.l2_lambda * tf.reduce_sum([tf.nn.l2_loss(var) for var in tf.trainable_variables()]), name='loss')

@@ -1,9 +1,11 @@
 Miniplaces
+* ? Update the loss function so that if you predict the correct label as, e.g., the second most likely class, your loss is smaller than if you predict it as being much less likely. This could help us to do better on acc@5; it might give a better signal during training too? I'm not sure.
+* make sure that separate model classes (e.g. PretrainedCNN vs CNN) save to a different log_key. Perhaps add a log_key suffix or prefix that the model uses? So instead of "default", it would use "default_cnn" or "default_pretrainedcnn"
 * have tnrange write the loss for each batch
+* Make a ResNet or make the images at least 197x197 to try keras.ResNet50
 * Look at dilated convolution (large kernels w/ small # parameters)
 * Try turning on the pooling after the CNN modules (for the pretrained ones)
 * Dataset augmentation
-* need to make images at least 197x197 if we want to try keras.ResNet50
 * Make named models instead of run_num? It would be nicer in tensorboard
 * Make dense_activation a string instead of a function, like cnn_module
 * Add visualizations of the trained network
