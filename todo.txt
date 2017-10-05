@@ -1,3 +1,6 @@
+General
+* Figure out how to name the models so that we don't step on each other's toes (names) when there are multiple users (e.g. accidentally using the same run number or name). Could just have one of us move their run number up to something huge. For named models, put your initials as a suffix?
+
 Miniplaces
 * ? Update the loss function so that if you predict the correct label as, e.g., the second most likely class, your loss is smaller than if you predict it as being much less likely. This could help us to do better on acc@5; it might give a better signal during training too? I'm not sure.
 * make sure that separate model classes (e.g. PretrainedCNN vs CNN) save to a different log_key. Perhaps add a log_key suffix or prefix that the model uses? So instead of "default", it would use "default_cnn" or "default_pretrainedcnn"

@@ -20,8 +20,10 @@ class BaseNN(object):
     """
     This class implements several methods that may be used by neural networks in general. It doesn't actually create any
     layers, so it shouldn't be used directly.
-    Currently, this class only works for classification, not regression.
+    Currently, this class only works for classification, not regression. It also defines the score method already and expects that
+    the model can calculate accuracy@1 and accuracy@5, so it expects >= 5-way classification.
     """
+
     def __init__(
         self,
         log_fname        = '{}/models/log.h5'.format(miniplaces),
@@ -67,13 +69,14 @@ class BaseNN(object):
         tf.set_random_seed(self.random_state)
         np.random.seed(self.random_state)
 
+    def __check_graph__(self):
+        required_attrs = ['loss_op', 'train_op', 'inputs_p', 'labels_p', 'accuracy1', 'accuracy5']
+        for attr in required_attrs:
+            getattr(self, attr)
+
     def __build_graph__(self):
         """
-        If self.log_dir contains a previously trained model, then the graph from that run is loaded for further
-        training/inference. Otherwise, a new graph is built.
-        Also starts a session with self.graph.
-        If self.log_dir != '' then a Saver and summary writers are also created.
-        :returns: None
+        This method should be overridden by all subclasses. The code below is just starter code.
         """
 
         self.graph = tf.Graph()
@@ -82,6 +85,7 @@ class BaseNN(object):
             self.global_init = tf.global_variables_initializer()
 
         self.__add_savers_and_writers__()
+        self.__check_graph__()
     
     def __add_savers_and_writers__(self):
         if self.log_dir != '':
@@ -358,6 +362,7 @@ class PretrainedCNN(BaseNN):
             self.saver = tf.train.Saver()
             self.global_init = tf.global_variables_initializer()
         self.__add_savers_and_writers__()
+        self.__check_graph__()
 
 
 class CNN(BaseNN):
@@ -369,7 +374,7 @@ class CNN(BaseNN):
         img_height       = 128,
         n_channels       = 3,
         n_classes        = None,
-        log_fname        = '../models/log.h5',
+        log_fname        = '{}/models/log.h5'.format(miniplaces),
         log_key          = 'default',
         data_params      = None,
         cnn_nodes       = (256,),
@@ -465,7 +470,12 @@ class CNN(BaseNN):
 
             self.train_op = tf.train.AdamOptimizer(self.learning_rate, self.beta1, self.beta2).minimize(self.loss_op, name='train_op')
 
+            self.probs_p = tf.placeholder(tf.float32, shape=(None, self.n_classes), name='probs_p')
+            self.accuracy1 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=1), tf.float32))
+            self.accuracy5 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=5), tf.float32))
+
             self.saver = tf.train.Saver()
             self.global_init = tf.global_variables_initializer()
 
         self.__add_savers_and_writers__()
+        self.__check_graph__()
