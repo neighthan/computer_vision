@@ -9,7 +9,8 @@ import os
 import sys
 from utils import tf_init, get_next_run_num, get_abs_path
 from typing import List, Optional, Dict, Any
-from layers import ConvLayer, MaxPoolLayer, AvgPoolLayer, BranchedLayer, MergeLayer, LayerModule, FlattenLayer, DenseLayer, _Layer
+from layers import ConvLayer, MaxPoolLayer, AvgPoolLayer, BranchedLayer, MergeLayer, LayerModule, FlattenLayer,\
+    DenseLayer, DropoutLayer, _Layer
 import warnings
 
 tf.logging.set_verbosity(tf.logging.WARN)
@@ -423,7 +424,7 @@ class CNN(BaseNN):
             data_params = {}
 
         if new_run:
-            assert type(n_classes) is not None
+            assert type(layers) is not None
             self.layers = layers
             self.img_height = img_height
             self.img_width = img_width
@@ -546,11 +547,11 @@ def inception(
         ConvLayer(1536, 3, strides=2), # reduction_b
         *([inception_c] * 3),
         AvgPoolLayer(8, 1, padding='valid'),
-        FlattenLayer()
+        FlattenLayer(),
+        DropoutLayer(rate=0.8)
     ]
 
     return CNN(layers=layers, img_width=img_width, img_height=img_height, n_channels=n_channels, n_classes=n_classes,
                log_fname=log_fname, log_key=log_key, data_params=data_params, l2_lambda=l2_lambda,
                learning_rate=learning_rate, beta1=beta1, beta2=beta2, config=config, run_num=run_num,
                batch_size=batch_size, record=record, random_state=random_state)
-
