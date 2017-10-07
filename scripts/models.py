@@ -2,15 +2,26 @@ from __future__ import print_function, division, absolute_import
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tqdm import tnrange
+from tflearn import activations
+from tqdm import tnrange, trange
 import time
 import os
 import sys
 from utils import tf_init, get_next_run_num, get_abs_path
+from typing import List, Optional, Dict, Any
+from layers import _Layer
+import warnings
 
-cnn_modules = {
+warnings.filterwarnings('ignore', category=pd.io.pytables.PerformanceWarning)
+
+_cnn_modules = {
     'vgg16': tf.contrib.keras.applications.VGG16,
     'xception': tf.contrib.keras.applications.Xception
+}
+
+_activations = {
+    'relu': tf.nn.relu,
+    'prelu': activations.prelu
 }
 
 miniplaces = get_abs_path('../miniplaces/')
@@ -70,7 +81,7 @@ class BaseNN(object):
         np.random.seed(self.random_state)
 
     def __check_graph__(self):
-        required_attrs = ['loss_op', 'train_op', 'inputs_p', 'labels_p', 'accuracy1', 'accuracy5']
+        required_attrs = ['loss_op', 'train_op', 'inputs_p', 'labels_p', 'probs_p', 'accuracy1', 'accuracy5', 'predict']
         for attr in required_attrs:
             getattr(self, attr)
 
@@ -83,6 +94,10 @@ class BaseNN(object):
         with self.graph.as_default():
             self.saver = tf.train.Saver()
             self.global_init = tf.global_variables_initializer()
+
+            self.probs_p = tf.placeholder(tf.float32, shape=(None, self.n_classes), name='probs_p')
+            self.accuracy1 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=1), tf.float32))
+            self.accuracy5 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=5), tf.float32))
 
         self.__add_savers_and_writers__()
         self.__check_graph__()
@@ -108,14 +123,10 @@ class BaseNN(object):
     
     def predict_proba(self, inputs):
         """
-        Generates predictions (predicted 'probabilities', not binary labels) on the test set
-        :param labels: these are also needed because the data iterator feeds in batches of inputs and labels.
-                       Having the labels also lets us put the same index on the predictions.
+        Generates predictions (predicted 'probabilities', not binary labels)
         :returns: array of predicted probabilities of being positive for each sample in the test set
         :rtype: pd.DataFrame
         """
-
-#         self.sess.run(self.data_init_op, {self.inputs_p: inputs.values, self.labels_p: labels.values})
 
         predictions = []
         idx = list(range(len(inputs)))
@@ -127,7 +138,7 @@ class BaseNN(object):
     def __save__(self):
         self.saver.save(self.sess, os.path.join(self.log_dir, 'model.ckpt'))
 
-    def __add_summaries__(self, epoch, train_loss, dev_loss):
+    def __add_summaries__(self, epoch, train_loss, dev_loss, dev_acc1, dev_acc5):
         summary_str = self.sess.run(self.summary_op)
         self.train_writer.add_summary(summary_str, epoch)
 
@@ -135,20 +146,36 @@ class BaseNN(object):
             value=[tf.Summary.Value(tag='loss', simple_value=train_loss)]), epoch)
         self.dev_writer.add_summary(tf.Summary(
             value=[tf.Summary.Value(tag='loss', simple_value=dev_loss)]), epoch)
+        self.dev_writer.add_summary(tf.Summary(
+            value=[tf.Summary.Value(tag='acc1', simple_value=dev_acc1)]), epoch)
+        self.dev_writer.add_summary(tf.Summary(
+            value=[tf.Summary.Value(tag='acc5', simple_value=dev_acc5)]), epoch)
 
-    def train(self, train_inputs, train_labels, dev_inputs, dev_labels, n_epochs=100, max_patience=5, in_notebook=False,
-             verbose=False):
+    def train(self, train_inputs, train_labels, dev_inputs, dev_labels, n_epochs=100, max_patience=5, in_notebook=False):
+        """
+        The best epoch is the one where the accuracy on the dev set is the highest. "best" in reference to other metrics
+        (e.g. dev accuracy@5) means the value of that metric at the best epoch.
+        :param train_inputs:
+        :param train_labels:
+        :param dev_inputs:
+        :param dev_labels:
+        :param n_epochs:
+        :param max_patience:
+        :param in_notebook:
+        :returns: best_dev_acc1, best_dev_acc5, best_train_loss, best_dev_loss, train_time, run_num
+        """
+
         start_time = time.time()
 
         if in_notebook:
             epoch_range = lambda *args: tnrange(*args, unit='epoch')
             batch_range = lambda *args: tnrange(*args, unit='batch', leave=False)
         else:
-            epoch_range = range
-            batch_range = range
+            epoch_range = lambda *args: trange(*args, unit='epoch')
+            batch_range = lambda *args: trange(*args, unit='batch', leave=False)
 
-        best_train_loss = early_stop_loss = best_dev_loss = np.inf
-        best_epoch = 0
+        best_train_loss = best_dev_loss = np.inf
+        best_dev_acc1 = best_dev_acc5 = early_stop_acc = 0
         patience = max_patience
         train_batches_per_epoch = int(np.ceil(len(train_inputs) / self.batch_size))
         dev_batches_per_epoch   = int(np.ceil(len(dev_inputs) / self.batch_size))
@@ -156,54 +183,61 @@ class BaseNN(object):
         train_idx = list(range(len(train_labels)))
         dev_idx = list(range(len(dev_labels)))
 
-        for epoch in epoch_range(n_epochs):
+        epochs = epoch_range(n_epochs)
+        for epoch in epochs:
             np.random.shuffle(train_idx)
-#             self.sess.run(self.data_init_op, {self.inputs_p: train_inputs, self.labels_p: train_labels})
+
             train_loss = []
-            for batch in batch_range(train_batches_per_epoch):
+            batches = batch_range(train_batches_per_epoch)
+            for batch in batches:
                 batch_idx = train_idx[batch * self.batch_size : (batch + 1) * self.batch_size]
                 loss, _ = self.sess.run([self.loss_op, self.train_op], {self.inputs_p: train_inputs[batch_idx],
                                                                        self.labels_p: train_labels[batch_idx]})
                 train_loss.append(loss)
+                batches.set_description('{:.3f}'.format(loss))
 
-#             self.sess.run(self.data_init_op, {self.inputs_p: dev_inputs, self.labels_p: dev_labels})
             dev_loss = []
-            for batch in batch_range(dev_batches_per_epoch):
+            preds = []
+            batches = batch_range(dev_batches_per_epoch)
+            for batch in batches:
                 batch_idx = dev_idx[batch * self.batch_size : (batch + 1) * self.batch_size]
-                dev_loss.append(self.sess.run(self.loss_op, {self.inputs_p: dev_inputs[batch_idx],
-                                                            self.labels_p: dev_labels[batch_idx]}))
+                loss, pred = self.sess.run([self.loss_op, self.predict], {self.inputs_p: dev_inputs[batch_idx],
+                                                            self.labels_p: dev_labels[batch_idx]})
+                dev_loss.append(loss)
+                preds.append(pred)
+                batches.set_description('{:.3f}'.format(loss))
 
             train_loss = np.mean(train_loss)
             dev_loss = np.mean(dev_loss)
+            dev_acc1, dev_acc5 = self.sess.run([self.accuracy1, self.accuracy5], {self.probs_p: preds, self.labels_p: dev_labels})
 
             if self.record:
-                self.__add_summaries__(epoch, train_loss, dev_loss)
+                self.__add_summaries__(epoch, train_loss, dev_loss, dev_acc1, dev_acc5)
 
-            if dev_loss < best_dev_loss: # always keep updating the best model
+            if dev_acc1 > best_dev_acc1: # always keep updating the best model
+                best_dev_acc1 = dev_acc1
+                best_dev_acc5 = dev_acc5
                 best_dev_loss = dev_loss
                 best_train_loss = train_loss
-                best_epoch = epoch
                 train_time = (time.time() - start_time) / 60 # in minutes
                 if self.record:
                     self.__log__({'train_loss': best_train_loss, 'dev_loss': best_dev_loss, 'train_time': train_time,
                                   'train_complete': False})
                     self.__save__()
 
-            if dev_loss < .99 * early_stop_loss:
+            if dev_acc1 > 1.01 * early_stop_acc:
                 # keeping this separate means the model has max_patience epochs to increase >1%
                 # instead of potentially just having one epoch (if we used best_dev_auc, which is
                 # continually updated)
                 patience = max_patience
-                early_stop_loss = dev_loss
+                early_stop_acc = dev_acc1
             else:
                 patience -= 1
                 if patience == 0:
-                    print("Early stop! Saved model is epoch {}, which had loss = {:.3f}\
-                    (run number {})".format(best_epoch + 1, best_dev_loss, self.run_num))
                     break
+
             runtime = int((time.time() - start_time) / 60)
-            if verbose:
-                print("Epoch {}. Train Loss: {:.3f}. Dev loss: {:.3f}. Runtime {}."\
+            epochs.set_description("Epoch {}. Train Loss: {:.3f}. Dev loss: {:.3f}. Runtime {}."\
                   .format(epoch + 1, best_train_loss, best_dev_loss, runtime))
 
         train_time = (time.time() - start_time) / 60 # in minutes
@@ -212,7 +246,7 @@ class BaseNN(object):
                          'train_complete': True})
             self.saver.restore(self.sess, os.path.join(self.log_dir, 'model.ckpt')) # reload best epoch
 
-        return best_train_loss, best_dev_loss, train_time, self.run_num
+        return best_dev_acc1, best_dev_acc5, best_train_loss, best_dev_loss, train_time, self.run_num
 
     def __log__(self, extras):
         params_df = (pd.DataFrame([[self.params[key] for key in self.params.keys()]], columns=self.params.keys(), index=[self.run_num])
@@ -228,7 +262,6 @@ class BaseNN(object):
             params_df.to_hdf(self.log_fname, self.log_key)
 
     def score(self, inputs, labels):
-#         self.sess.run([self.data_init_op], {self.inputs_p: inputs, self.labels_p: labels})
         probs = self.predict_proba(inputs)
         return self.sess.run([self.accuracy1, self.accuracy5], {self.probs_p: probs, self.labels_p: labels})
 
@@ -255,7 +288,7 @@ class PretrainedCNN(BaseNN):
         batch_size       = 64,
         record           = True,
         random_state     = 521,
-        dense_activation = tf.nn.relu,
+        dense_activation = 'relu',
         finetune         = False,
         pretrained_weights = False,
         cnn_module       = 'vgg16'
@@ -307,42 +340,28 @@ class PretrainedCNN(BaseNN):
         :returns: None
         """
 
-        meta_graph_file = os.path.join(self.log_dir, 'model.ckpt.meta')
         self.graph = tf.Graph()
         self.sess = tf.Session(config=self.config, graph=self.graph)
 
         with self.graph.as_default(), self.sess.as_default():
             self.inputs_p = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p')
             self.labels_p = tf.placeholder(tf.int32, shape=None, name='labels_p')
-            self.onehot_labels = tf.one_hot(self.labels_p, depth=self.n_classes, name='onehot_labels')
-
-#             data = tf.contrib.data.Dataset.from_tensor_slices((self.inputs_p, self.labels_p))
-            
-#             self.data = data.batch(self.batch_size)
-
-#             iterator = tf.contrib.data.Iterator.from_structure(self.data.output_types, self.data.output_shapes)
-#             self.data_init_op = iterator.make_initializer(self.data)
-
-#             self.inputs, self.labels = iterator.get_next()
             
             with tf.variable_scope('cnn'):
-                if self.pretrained_weights:
-                    weights = 'imagenet'
-                else:
-                    weights = None
+                weights = 'imagenet' if self.pretrained_weights else None
 
                 cnn = cnn_modules[self.cnn_module]
                 cnn_out = cnn(include_top=False, input_tensor=self.inputs_p, weights=weights).output
                 hidden = tf.contrib.layers.flatten(cnn_out)
-            
+
+            dense_activation = activations[self.dense_activation]
             with tf.variable_scope('dense'):
                 for i in range(len(self.dense_nodes)):
-                    hidden = tf.layers.dense(hidden, self.dense_nodes[i], activation=self.dense_activation, name='dense_{}'.format(i))
+                    hidden = tf.layers.dense(hidden, self.dense_nodes[i], activation=dense_activation, name='dense_{}'.format(i))
                 self.logits = tf.layers.dense(hidden, self.n_classes, activation=None, name='logits')
 
             self.predict = tf.nn.softmax(self.logits, name='predict')
             self.loss_op = tf.losses.sparse_softmax_cross_entropy(self.labels_p, self.logits, scope='xent')
-#             self.loss_op = tf.losses.softmax_cross_entropy(self.onehot_labels, self.logits, scope='xent')
 
             if self.l2_lambda:
                 self.loss_op = tf.add(self.loss_op, self.l2_lambda * tf.reduce_sum([tf.nn.l2_loss(var) for var in tf.trainable_variables()]), name='loss')
@@ -370,48 +389,44 @@ class CNN(BaseNN):
     """
     def __init__(
         self,
-        img_width        = 128,
-        img_height       = 128,
-        n_channels       = 3,
-        n_classes        = None,
-        log_fname        = '{}/models/log.h5'.format(miniplaces),
-        log_key          = 'default',
-        data_params      = None,
-        cnn_nodes       = (256,),
-        dense_nodes      = (128,),
-        l2_lambda        = None,
-        learning_rate    = 0.001,
-        beta1            = 0.9,
-        beta2            = 0.999,
-        config           = None,
-        run_num          = -1,
-        batch_size       = 128,
-        record           = True,
-        random_state     = 521,
-        dense_activation = tf.nn.relu
+        layers:        Optional[List[_Layer]] = None,
+        img_width:                        int = 128,
+        img_height:                       int = 128,
+        n_channels:                       int = 3,
+        n_classes:                        int = 2,
+        log_fname:                        str = '{}/models/log.h5'.format(miniplaces),
+        log_key:                          str = 'default',
+        data_params: Optional[Dict[str, Any]] = None,
+        l2_lambda:            Optional[float] = None,
+        learning_rate:                  float = 0.001,
+        beta1:                          float = 0.9,
+        beta2:                          float = 0.999,
+        config:      Optional[tf.ConfigProto] = None,
+        run_num:                          int = -1,
+        batch_size:                       int = 128,
+        record:                          bool = True,
+        random_state:                     int = 521,
     ):
         new_run = run_num == -1
         super(CNN, self).__init__(log_fname, log_key, config, run_num, batch_size, record, random_state)
 
-        param_names = ['img_width', 'img_height', 'n_channels', 'n_classes', 'cnn_nodes', 'dense_nodes', 'l2_lambda', 'learning_rate',
-                       'beta1', 'beta2', 'random_state', 'batch_size', 'dense_activation']
+        param_names = ['img_width', 'img_height', 'n_channels', 'n_classes', 'l2_lambda', 'learning_rate',
+                       'beta1', 'beta2', 'random_state', 'batch_size', 'layers']
 
         if data_params is None:
             data_params = {}
 
         if new_run:
             assert type(n_classes) is not None
+            self.layers = layers
             self.img_height = img_height
             self.img_width = img_width
             self.n_channels = n_channels
             self.n_classes = n_classes
-            self.cnn_nodes = cnn_nodes
-            self.dense_nodes = dense_nodes
             self.l2_lambda = l2_lambda
             self.learning_rate = learning_rate
             self.beta1 = beta1
             self.beta2 = beta2
-            self.dense_activation = dense_activation
         else:
             log = pd.read_hdf(log_fname, log_key)
             for param in param_names:
@@ -433,34 +448,17 @@ class CNN(BaseNN):
         :returns: None
         """
 
-        meta_graph_file = os.path.join(self.log_dir, 'model.ckpt.meta')
         self.graph = tf.Graph()
         with self.graph.as_default():
             self.inputs_p = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p')
             self.labels_p = tf.placeholder(tf.int32, shape=None, name='labels_p')
 
-#             data = tf.contrib.data.Dataset.from_tensor_slices((self.inputs_p, self.labels_p))
-            
-#             self.data = data.batch(self.batch_size)
-
-#             iterator = tf.contrib.data.Iterator.from_structure(self.data.output_types, self.data.output_shapes)
-#             self.data_init_op = iterator.make_initializer(self.data)
-
-#             self.inputs, self.labels = iterator.get_next()
-            
             hidden = self.inputs_p
-            
-            with tf.variable_scope('cnn'):
-                for i in range(len(self.cnn_nodes)):
-                    hidden = tf.layers.conv2d(hidden, self.cnn_nodes[i], kernel_size=3, activation=tf.nn.relu, padding='same', name='conv_{}'.format(i))
-                    hidden = tf.layers.max_pooling2d(hidden, 2, 2, padding='same', name='max_pool_{}'.format(i))
 
-                hidden = tf.contrib.layers.flatten(hidden)
-            
-            with tf.variable_scope('dense'):
-                for i in range(len(self.dense_nodes)):
-                    hidden = tf.layers.dense(hidden, self.dense_nodes[i], activation=self.dense_activation, name='dense_{}'.format(i))
-                self.logits = tf.layers.dense(hidden, self.n_classes, activation=None, name='logits')
+            for layer in self.layers:
+                hidden = layer.apply(hidden)
+
+            self.logits = tf.layers.dense(hidden, self.n_classes, activation=None, name='logits')
 
             self.predict = tf.nn.softmax(self.logits, name='predict')
             self.loss_op = tf.losses.sparse_softmax_cross_entropy(self.labels_p, self.logits, scope='xent')
