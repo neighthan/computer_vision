@@ -1,19 +1,35 @@
-from __future__ import division, print_function
 import re
 import os
 import subprocess
-import cPickle as pickle
+import pickle
 import tensorflow as tf
 import numpy as np
 from PIL import Image
 from PIL import PngImagePlugin
 
 
+def output_file(preds, split='test', k=5, pad_to=8):
+    top_k_preds = np.stack(preds.apply(lambda row: row.sort_values(ascending=False)[:k].index.tolist(), axis=1))
+    fnames = ['{}/{}.jpg'.format(split, str(i).zfill(pad_to)) for i in range(1, len(top_k_preds) + 1)]
+    preds = pd.DataFrame(top_k_preds, index=fnames)
+    preds.to_csv('preds.txt', sep=' ', header=None)
+
+
+def flatten(list_):
+    flat = []
+    for elem in list_:
+        if type(elem) in [list, tuple]:
+            flat.extend(flatten(elem))
+        else:
+            flat.append(elem)
+    return flat
+
+
 def get_best_gpu(n_gpus=4):
     mem_pattern = re.compile("\d+MiB /")
     gpu_usage = {}
     for i in range(n_gpus):
-        gpu_i_usage = subprocess.check_output(['nvidia-smi', '--id={}'.format(i)])
+        gpu_i_usage = subprocess.check_output(['nvidia-smi', '--id={}'.format(i)]).decode('utf8')
         match = mem_pattern.search(gpu_i_usage)
         gpu_usage[i] = int(match.group()[:-5]) # drop "MiB /"
 
@@ -42,12 +58,12 @@ def get_next_run_num(run_num_file, verbose=True):
     """
 
     try:
-        with open(run_num_file) as infile:
+        with open(run_num_file, 'rb') as infile:
             run_num = pickle.load(infile)
     except IOError:  # no file yet
         run_num = 0
 
-    with open(run_num_file, 'w') as outfile:
+    with open(run_num_file, 'wb') as outfile:
         pickle.dump(run_num + 1, outfile)
 
     if verbose:
@@ -81,7 +97,7 @@ def load_data(task):
         return _load_data_miniplaces()
     elif task == 'vqa':
         return _load_data_vqa()
-    assert False, 'task must be one of \{miniplaces, vqa\}, not {}.'.format(task)
+    assert False, 'task must be one of {{miniplaces, vqa}}, not {}.'.format(task)
 
 
 def _load_data_miniplaces():
