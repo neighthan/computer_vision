@@ -81,7 +81,6 @@ def tf_init(device=''):
     :returns: the aforementioned TensorFlow config
     """
 
-    tf.logging.set_verbosity(tf.logging.WARN)
     if device:
         os.environ['CUDA_VISIBLE_DEVICES'] = device
     else:
