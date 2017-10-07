@@ -9,9 +9,10 @@ import os
 import sys
 from utils import tf_init, get_next_run_num, get_abs_path
 from typing import List, Optional, Dict, Any
-from layers import _Layer
+from layers import ConvLayer, MaxPoolLayer, AvgPoolLayer, BranchedLayer, MergeLayer, LayerModule, FlattenLayer, DenseLayer, _Layer
 import warnings
 
+tf.logging.set_verbosity(tf.logging.WARN)
 warnings.filterwarnings('ignore', category=pd.io.pytables.PerformanceWarning)
 
 _cnn_modules = {
@@ -81,7 +82,8 @@ class BaseNN(object):
         np.random.seed(self.random_state)
 
     def __check_graph__(self):
-        required_attrs = ['loss_op', 'train_op', 'inputs_p', 'labels_p', 'probs_p', 'accuracy1', 'accuracy5', 'predict']
+        required_attrs = ['loss_op', 'train_op', 'inputs_p', 'labels_p', 'probs_p', 'accuracy1', 'accuracy5', 'predict',
+                          'is_training']
         for attr in required_attrs:
             getattr(self, attr)
 
@@ -94,6 +96,7 @@ class BaseNN(object):
         with self.graph.as_default():
             self.saver = tf.train.Saver()
             self.global_init = tf.global_variables_initializer()
+            self.is_training = tf.placeholder_with_default(False, [])
 
             self.probs_p = tf.placeholder(tf.float32, shape=(None, self.n_classes), name='probs_p')
             self.accuracy1 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=1), tf.float32))
@@ -192,7 +195,8 @@ class BaseNN(object):
             for batch in batches:
                 batch_idx = train_idx[batch * self.batch_size : (batch + 1) * self.batch_size]
                 loss, _ = self.sess.run([self.loss_op, self.train_op], {self.inputs_p: train_inputs[batch_idx],
-                                                                       self.labels_p: train_labels[batch_idx]})
+                                                                        self.labels_p: train_labels[batch_idx],
+                                                                        self.is_training: True})
                 train_loss.append(loss)
                 batches.set_description('{:.3f}'.format(loss))
 
@@ -209,12 +213,13 @@ class BaseNN(object):
 
             train_loss = np.mean(train_loss)
             dev_loss = np.mean(dev_loss)
+            preds = np.concatenate(preds)
             dev_acc1, dev_acc5 = self.sess.run([self.accuracy1, self.accuracy5], {self.probs_p: preds, self.labels_p: dev_labels})
 
             if self.record:
                 self.__add_summaries__(epoch, train_loss, dev_loss, dev_acc1, dev_acc5)
 
-            if dev_acc1 > best_dev_acc1: # always keep updating the best model
+            if dev_acc5 > best_dev_acc5: # always keep updating the best model
                 best_dev_acc1 = dev_acc1
                 best_dev_acc5 = dev_acc5
                 best_dev_loss = dev_loss
@@ -225,12 +230,12 @@ class BaseNN(object):
                                   'train_complete': False})
                     self.__save__()
 
-            if dev_acc1 > 1.01 * early_stop_acc:
+            if dev_acc5 > 1.01 * early_stop_acc:
                 # keeping this separate means the model has max_patience epochs to increase >1%
                 # instead of potentially just having one epoch (if we used best_dev_auc, which is
                 # continually updated)
                 patience = max_patience
-                early_stop_acc = dev_acc1
+                early_stop_acc = dev_acc5
             else:
                 patience -= 1
                 if patience == 0:
@@ -346,6 +351,7 @@ class PretrainedCNN(BaseNN):
         with self.graph.as_default(), self.sess.as_default():
             self.inputs_p = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p')
             self.labels_p = tf.placeholder(tf.int32, shape=None, name='labels_p')
+            self.is_training = tf.placeholder_with_default(False, [])
             
             with tf.variable_scope('cnn'):
                 weights = 'imagenet' if self.pretrained_weights else None
@@ -403,7 +409,7 @@ class CNN(BaseNN):
         beta2:                          float = 0.999,
         config:      Optional[tf.ConfigProto] = None,
         run_num:                          int = -1,
-        batch_size:                       int = 128,
+        batch_size:                       int = 64,
         record:                          bool = True,
         random_state:                     int = 521,
     ):
@@ -452,11 +458,12 @@ class CNN(BaseNN):
         with self.graph.as_default():
             self.inputs_p = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p')
             self.labels_p = tf.placeholder(tf.int32, shape=None, name='labels_p')
+            self.is_training = tf.placeholder_with_default(False, [])
 
             hidden = self.inputs_p
 
             for layer in self.layers:
-                hidden = layer.apply(hidden)
+                hidden = layer.apply(hidden, is_training=self.is_training)
 
             self.logits = tf.layers.dense(hidden, self.n_classes, activation=None, name='logits')
 
@@ -477,3 +484,73 @@ class CNN(BaseNN):
 
         self.__add_savers_and_writers__()
         self.__check_graph__()
+
+def inception(
+        img_width:                        int = 128,
+        img_height:                       int = 128,
+        n_channels:                       int = 3,
+        n_classes:                        int = 2,
+        log_fname:                        str = '{}/models/log.h5'.format(miniplaces),
+        log_key:                          str = 'default',
+        data_params: Optional[Dict[str, Any]] = None,
+        l2_lambda:            Optional[float] = None,
+        learning_rate:                  float = 0.001,
+        beta1:                          float = 0.9,
+        beta2:                          float = 0.999,
+        config:      Optional[tf.ConfigProto] = None,
+        run_num:                          int = -1,
+        batch_size:                       int = 64,
+        record:                          bool = True,
+        random_state:                     int = 521,):
+
+    inception_a = LayerModule([
+        BranchedLayer([AvgPoolLayer(1, 1), ConvLayer(96, 1), ConvLayer(64, 1), ConvLayer(64, 1)]),
+        BranchedLayer([ConvLayer(96, 1), None, ConvLayer(96, 3), ConvLayer(96, 3)]),
+        BranchedLayer([None, None, None, ConvLayer(96, 3)]),
+        MergeLayer(axis=3)
+    ])
+
+    inception_b = LayerModule([
+        BranchedLayer([AvgPoolLayer(1, 1), ConvLayer(384, 1), ConvLayer(192, 1), ConvLayer(192, 1)]),
+        BranchedLayer([ConvLayer(128, 1), None, ConvLayer(224, [7, 1]), ConvLayer(192, [1, 7])]),
+        BranchedLayer([None, None, ConvLayer(256, [1, 7]), ConvLayer(224, [7, 1])]),
+        BranchedLayer([None, None, None, ConvLayer(224, [1, 7])]),
+        BranchedLayer([None, None, None, ConvLayer(256, [7, 1])]),
+        MergeLayer(axis=3)
+    ])
+
+    inception_c = LayerModule([
+        BranchedLayer([AvgPoolLayer(1, 1), ConvLayer(256, 1), ConvLayer(384, 1), ConvLayer(384, 1)]),
+        BranchedLayer([ConvLayer(256, 1), None, BranchedLayer([ConvLayer(256, [1, 3]), ConvLayer(256, [3, 1])]), ConvLayer(448, [1, 3])]),
+        BranchedLayer([None, None, None, ConvLayer(512, [3, 1])]),
+        BranchedLayer([None, None, None, BranchedLayer([ConvLayer(256, [3, 1]), ConvLayer(256, [1, 3])])]),
+        MergeLayer(axis=3)
+    ])
+
+    layers = [
+        ConvLayer(32, 3, 2, padding='valid'),
+        ConvLayer(32, 3),
+        ConvLayer(64, 3),
+        BranchedLayer([MaxPoolLayer(3, padding='valid'), ConvLayer(96, 3, padding='valid')]), # don't use stride of 2 since our images are smaller
+        MergeLayer(axis=3),
+        BranchedLayer([ConvLayer(64, 1), ConvLayer(64, 1)]),
+        BranchedLayer([ConvLayer(96, 3, padding='valid'), ConvLayer(64, [7, 1])]),
+        BranchedLayer([None, ConvLayer(64, [1, 7])]),
+        BranchedLayer([None, ConvLayer(96, 3, padding='valid')]),
+        MergeLayer(axis=3),
+        BranchedLayer([ConvLayer(192, 3, strides=2, padding='valid'), MaxPoolLayer(3, strides=2, padding='valid')]),
+        MergeLayer(axis=3),
+        *([inception_a] * 4),
+        ConvLayer(1024, 3, strides=2), # reduction_a
+        *([inception_b] * 7),
+        ConvLayer(1536, 3, strides=2), # reduction_b
+        *([inception_c] * 3),
+        AvgPoolLayer(8, 1, padding='valid'),
+        FlattenLayer()
+    ]
+
+    return CNN(layers=layers, img_width=img_width, img_height=img_height, n_channels=n_channels, n_classes=n_classes,
+               log_fname=log_fname, log_key=log_key, data_params=data_params, l2_lambda=l2_lambda,
+               learning_rate=learning_rate, beta1=beta1, beta2=beta2, config=config, run_num=run_num,
+               batch_size=batch_size, record=record, random_state=random_state)
+
