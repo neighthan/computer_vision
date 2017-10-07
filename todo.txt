@@ -1,9 +1,16 @@
 General
-* Figure out how to name the models so that we don't step on each other's toes (names) when there are multiple users (e.g. accidentally using the same run number or name). Could just have one of us move their run number up to something huge. For named models, put your initials as a suffix?
+* ? is layers saved to disk in a way that will be easily reloadable even with code changes?
+* for batchnorm, need to know whether you're training or not; set train=false when making graph, =true when train() called, =false at end of train()
+* add __str__ and __repr__ for the Layers classes
+* ? Get some hyperparameter tuning going
+* Multi-gpu training?
+
 
 Miniplaces
+* Add acc1 and acc5 to the log
+* Add plots for acc1 and acc5 to tensorboard
 * ? Update the loss function so that if you predict the correct label as, e.g., the second most likely class, your loss is smaller than if you predict it as being much less likely. This could help us to do better on acc@5; it might give a better signal during training too? I'm not sure.
-* make sure that separate model classes (e.g. PretrainedCNN vs CNN) save to a different log_key. Perhaps add a log_key suffix or prefix that the model uses? So instead of "default", it would use "default_cnn" or "default_pretrainedcnn"
+* ? make sure that separate model classes (e.g. PretrainedCNN vs CNN) save to a different log_key. Perhaps add a log_key suffix or prefix that the model uses? So instead of "default", it would use "default_cnn" or "default_pretrainedcnn"
 * have tnrange write the loss for each batch
 * Make a ResNet or make the images at least 197x197 to try keras.ResNet50
 * Look at dilated convolution (large kernels w/ small # parameters)
@@ -14,7 +21,7 @@ Miniplaces
 * Add visualizations of the trained network
 * What is tf.nn.local_response_normalization? Similar to batch norm?
 * Look at SDD for object detection; we'd need to train it from scratch, though. See what their data augmentation methods were; these apparently helped.
-* Try to use Dataset?
+* ? Try to use Dataset
 * If reloading a model, when you call train, early_stop_loss should be set to the dev_loss that was stored in the log. Otherwise, you'll end up always saving the model after the first training iteration, even if that was worse than the previously saved one.
 * Plot loss more often than once/epoch? Instantaneous loss for that batch? What about dev loss? For a random sample of the dev data? But only use the loss at the end of an epoch for early stopping?
 

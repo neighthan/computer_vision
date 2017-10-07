@@ -1,6 +1,7 @@
 **/.ipynb_checkpoints
 **/*.pyc
 **/.swp
+**/preds.txt
 miniplaces/data
 miniplaces/development_kit
 miniplaces/models
