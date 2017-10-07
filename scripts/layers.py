@@ -1,11 +1,25 @@
 import tensorflow as tf
 from utils import flatten
-from typing import Union, Sequence
+from typing import Union, Sequence, Optional
 
-_int_or_two = Union[int, Sequence[int]]
+_OneOrMore = lambda type_: Union[type_, Sequence[type_]]
 
 _activations = {
     'relu': tf.nn.relu
+}
+
+_layers = {
+    'conv2d': tf.layers.conv2d,
+    'max_pooling2d': tf.layers.max_pooling2d,
+    'average_pooling2d': tf.layers.average_pooling2d,
+    'flatten': tf.contrib.layers.flatten,
+    'dense': tf.layers.dense,
+    'dropout': tf.layers.dropout,
+    'concat': tf.concat
+}
+
+_initializers = {
+    'variance_scaling_initializer': tf.contrib.layers.variance_scaling_initializer
 }
 
 
@@ -18,15 +32,26 @@ class _Layer(object):
     or else the layer must override apply (see, e.g., BranchedLayer).
     """
 
-    def apply(self, inputs):
-        output = self.layer(inputs, **self.params)
+    def apply(self, inputs: tf.Tensor, is_training: tf.Tensor) -> tf.Tensor:
+        """
+
+        :param inputs:
+        :param is_training:
+        :return:
+        """
+        params = self.params.copy()
+        if 'kernel_initializer' in params.keys():
+            params['kernel_initializer'] = _initializers[params['kernel_initializer']]()
+
+        output = self.layer(inputs, **params)
+
         if self.batch_norm:
-            output = tf.contrib.layers.batch_norm(output)
+            output = tf.layers.batch_normalization(output, training=is_training)
         return output
 
 
 class ConvLayer(_Layer):
-    def __init__(self, n_filters:int, kernel_size:_int_or_two, strides: int=1,
+    def __init__(self, n_filters:int, kernel_size:_OneOrMore(int), strides: int=1,
                  activation: str='relu', padding: str='same', batch_norm: bool=True):
         self.params = dict(
             filters=n_filters,
@@ -34,14 +59,17 @@ class ConvLayer(_Layer):
             strides=strides,
             activation=_activations[activation],
             padding=padding,
-            kernel_initializer=tf.contrib.layers.variance_scaling_initializer()
+            kernel_initializer='variance_scaling_initializer'
         )
         self.batch_norm = batch_norm
-        self.layer = tf.layers.conv2d
+
+    @property
+    def layer(self):
+        return _layers['conv2d']
 
 
 class _PoolLayer(_Layer):
-    def __init__(self, size:_int_or_two, strides:_int_or_two, padding: str='same'):
+    def __init__(self, size:_OneOrMore(int), strides:_OneOrMore(int), padding: str='same'):
         self.params = dict(
             pool_size=size,
             strides=strides,
@@ -50,17 +78,23 @@ class _PoolLayer(_Layer):
 
 
 class MaxPoolLayer(_PoolLayer):
-    def __init__(self, size:_int_or_two, strides: _int_or_two=1, padding: str='same', batch_norm: bool=False):
+    def __init__(self, size:_OneOrMore(int), strides: _OneOrMore(int)=1, padding: str='same', batch_norm: bool=False):
         super().__init__(size, strides, padding)
         self.batch_norm = batch_norm
-        self.layer = tf.layers.max_pooling2d
+
+    @property
+    def layer(self):
+        return _layers['max_pooling2d']
 
 
 class AvgPoolLayer(_PoolLayer):
-    def __init__(self, size:_int_or_two, strides: _int_or_two=1, padding: str='same', batch_norm: bool=False):
+    def __init__(self, size:_OneOrMore(int), strides: _OneOrMore(int)=1, padding: str='same', batch_norm: bool=False):
         super().__init__(size, strides, padding)
         self.batch_norm = batch_norm
-        self.layer = tf.layers.average_pooling2d
+
+    @property
+    def layer(self):
+        return _layers['average_pooling2d']
 
 
 class BranchedLayer(_Layer):
@@ -76,7 +110,13 @@ class BranchedLayer(_Layer):
         """
         self.layers = layers
 
-    def apply(self, inputs):
+    def apply(self, inputs: _OneOrMore(tf.Tensor), is_training: tf.Tensor) -> Sequence[tf.Tensor]:
+        """
+
+        :param inputs:
+        :param is_training:
+        :return:
+        """
         if type(inputs) is not list:
             inputs = [inputs] * len(self.layers)
         else:
@@ -85,7 +125,7 @@ class BranchedLayer(_Layer):
         outputs = []
         for i in range(len(inputs)):
             if self.layers[i] is not None:
-                outputs.append(self.layers[i].apply(inputs[i]))
+                outputs.append(self.layers[i].apply(inputs[i], is_training))
             else:
                 outputs.append(inputs[i])
         return outputs
@@ -98,9 +138,18 @@ class MergeLayer(_Layer):
 
     def __init__(self, axis:int):
         self.params = dict(axis=axis)
-        self.layer = tf.concat
 
-    def apply(self, inputs):
+    @property
+    def layer(self):
+        return _layers['concat']
+
+    def apply(self, inputs: Sequence[tf.Tensor], batch_norm_phase: Optional[tf.Tensor]=None) -> tf.Tensor:
+        """
+
+        :param inputs: may be arbitrarily nested
+        :param batch_norm_phase: unused
+        :returns:
+        """
         return self.layer(flatten(inputs), **self.params)
 
 
@@ -108,7 +157,10 @@ class FlattenLayer(_Layer):
     def __init__(self):
         self.params = {}
         self.batch_norm = False
-        self.layer = tf.contrib.layers.flatten
+
+    @property
+    def layer(self):
+        return _layers['flatten']
 
 
 class DenseLayer(_Layer):
@@ -116,10 +168,28 @@ class DenseLayer(_Layer):
         self.params = dict(
             units=units,
             activation=_activations[activation],
-            kernel_initializer=tf.contrib.layers.variance_scaling_initializer()
+            kernel_initializer='variance_scaling_initializer'
         )
         self.batch_norm = batch_norm
-        self.layer = tf.layers.dense
+
+    @property
+    def layer(self):
+        return _layers['dense']
+
+
+class DropoutLayer(_Layer):
+    def __init__(self, rate:float):
+        self.params = dict(rate=rate)
+
+    @property
+    def layer(self):
+        return _layers['dropout']
+
+    def apply(self, inputs: tf.Tensor, is_training:tf.Tensor) -> tf.Tensor:
+        params = self.params.copy()
+        params['training'] = is_training
+
+        return self.layer(inputs, **params)
 
 
 class LayerModule(_Layer):
@@ -130,8 +200,16 @@ class LayerModule(_Layer):
     def __init__(self, layers: Sequence[_Layer]):
         self.layers = layers
 
-    def apply(self, inputs):
+    def apply(self, inputs: _OneOrMore(tf.Tensor), is_training: tf.Tensor) -> tf.Tensor:
+        """
+
+        :param inputs: should be a single tensor unless the first layer in the module is a branch layer; then it can
+                       be one tensor per branch (or still a single tensor which is the input to each branch)
+        :param is_training:
+        :returns:
+        """
+
         output = inputs
         for layer in self.layers:
-            output = layer.apply(output)
+            output = layer.apply(output, is_training)
         return output
