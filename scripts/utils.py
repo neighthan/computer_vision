@@ -71,7 +71,7 @@ def get_next_run_num(run_num_file, verbose=True):
     return run_num
 
 
-def tf_init(device=''):
+def tf_init(device='', n_gpus=4):
     """
     Runs common operations at start of TensorFlow:
       - sets logging verbosity to warn
@@ -84,7 +84,7 @@ def tf_init(device=''):
     if device:
         os.environ['CUDA_VISIBLE_DEVICES'] = device
     else:
-        os.environ['CUDA_VISIBLE_DEVICES'] = get_best_gpu()
+        os.environ['CUDA_VISIBLE_DEVICES'] = get_best_gpu(n_gpus=n_gpus)
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
     config.allow_soft_placement = True
