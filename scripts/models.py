@@ -1,4 +1,3 @@
-from __future__ import print_function, division, absolute_import
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -10,7 +9,7 @@ import sys
 from utils import tf_init, get_next_run_num, get_abs_path
 from typing import List, Optional, Dict, Any
 from layers import ConvLayer, MaxPoolLayer, AvgPoolLayer, BranchedLayer, MergeLayer, LayerModule, FlattenLayer,\
-    DenseLayer, DropoutLayer, _Layer
+    DenseLayer, DropoutLayer, GlobalAvgPoolLayer, GlobalMaxPoolLayer, _Layer
 import warnings
 
 tf.logging.set_verbosity(tf.logging.WARN)
@@ -457,7 +456,8 @@ class CNN(BaseNN):
 
         self.graph = tf.Graph()
         with self.graph.as_default():
-            self.inputs_p = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p')
+            self.inputs_p_raw = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p_raw')
+            self.inputs_p = self.inputs_p_raw / 255
             self.labels_p = tf.placeholder(tf.int32, shape=None, name='labels_p')
             self.is_training = tf.placeholder_with_default(False, [])
 
@@ -474,7 +474,12 @@ class CNN(BaseNN):
             if self.l2_lambda:
                 self.loss_op = tf.add(self.loss_op, self.l2_lambda * tf.reduce_sum([tf.nn.l2_loss(var) for var in tf.trainable_variables()]), name='loss')
 
-            self.train_op = tf.train.AdamOptimizer(self.learning_rate, self.beta1, self.beta2).minimize(self.loss_op, name='train_op')
+            # self.train_op = tf.train.AdamOptimizer(self.learning_rate, self.beta1, self.beta2).minimize(self.loss_op, name='train_op')
+            self.global_step = tf.Variable(0, trainable=False)
+            self.decayed_lr = tf.train.exponential_decay(self.learning_rate, self.global_step,
+                                                         decay_steps=200000 // self.batch_size, decay_rate=0.94)
+            self.optimizer = tf.train.RMSPropOptimizer(self.decayed_lr, epsilon=1)
+            self.train_op = self.optimizer.minimize(self.loss_op, global_step=self.global_step, name='train_op')
 
             self.probs_p = tf.placeholder(tf.float32, shape=(None, self.n_classes), name='probs_p')
             self.accuracy1 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=1), tf.float32))
@@ -541,12 +546,12 @@ def inception(
         MergeLayer(axis=3),
         BranchedLayer([ConvLayer(192, 3, strides=2, padding='valid'), MaxPoolLayer(3, strides=2, padding='valid')]),
         MergeLayer(axis=3),
-        *([inception_a] * 4),
+        *([inception_a] * 1), # x4
         ConvLayer(1024, 3, strides=2), # reduction_a
-        *([inception_b] * 7),
+        *([inception_b] * 1), # x7
         ConvLayer(1536, 3, strides=2), # reduction_b
-        *([inception_c] * 3),
-        AvgPoolLayer(8, 1, padding='valid'),
+        *([inception_c] * 1), # x3
+        GlobalAvgPoolLayer(),
         FlattenLayer(),
         DropoutLayer(rate=0.8)
     ]
