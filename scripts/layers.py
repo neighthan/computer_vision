@@ -69,32 +69,56 @@ class ConvLayer(_Layer):
 
 
 class _PoolLayer(_Layer):
-    def __init__(self, size:_OneOrMore(int), strides:_OneOrMore(int), padding: str='same'):
+    def __init__(self, size:_OneOrMore(int), strides: _OneOrMore(int)=1, padding: str='same', batch_norm: bool=False):
         self.params = dict(
             pool_size=size,
             strides=strides,
             padding=padding
         )
+        self.batch_norm = batch_norm
 
 
 class MaxPoolLayer(_PoolLayer):
-    def __init__(self, size:_OneOrMore(int), strides: _OneOrMore(int)=1, padding: str='same', batch_norm: bool=False):
-        super().__init__(size, strides, padding)
-        self.batch_norm = batch_norm
-
     @property
     def layer(self):
         return _layers['max_pooling2d']
 
 
 class AvgPoolLayer(_PoolLayer):
-    def __init__(self, size:_OneOrMore(int), strides: _OneOrMore(int)=1, padding: str='same', batch_norm: bool=False):
-        super().__init__(size, strides, padding)
-        self.batch_norm = batch_norm
-
     @property
     def layer(self):
         return _layers['average_pooling2d']
+
+
+class _GlobalPoolLayer(_Layer):
+    def __init__(self, batch_norm: bool=False):
+        self.params = dict(
+            strides=1,
+            padding='valid'
+        )
+        self.batch_norm = batch_norm
+
+    def apply(self, inputs: tf.Tensor, is_training: tf.Tensor):
+        params = self.params.copy()
+        params['pool_size'] = inputs.shape.as_list()[1:3] # height and width
+
+        output = self.layer(inputs, **params)
+
+        if self.batch_norm:
+            output = tf.layers.batch_normalization(output, training=is_training)
+        return output
+
+
+class GlobalAvgPoolLayer(_GlobalPoolLayer):
+    @property
+    def layer(self):
+        return _layers['average_pooling2d']
+
+
+class GlobalMaxPoolLayer(_GlobalPoolLayer):
+    @property
+    def layer(self):
+        return _layers['max_pooling2d']
 
 
 class BranchedLayer(_Layer):
@@ -143,11 +167,11 @@ class MergeLayer(_Layer):
     def layer(self):
         return _layers['concat']
 
-    def apply(self, inputs: Sequence[tf.Tensor], batch_norm_phase: Optional[tf.Tensor]=None) -> tf.Tensor:
+    def apply(self, inputs: Sequence[tf.Tensor], is_training: Optional[tf.Tensor]=None) -> tf.Tensor:
         """
 
         :param inputs: may be arbitrarily nested
-        :param batch_norm_phase: unused
+        :param is_training: unused
         :returns:
         """
         return self.layer(flatten(inputs), **self.params)
