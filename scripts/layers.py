@@ -258,7 +258,7 @@ class LSTMLayer(_Layer):
         outputs = tf.reshape(outputs, (-1, out_dim), name=output_name) # so TF has explicit shape information about this tensor
         return outputs
 
-    def apply(self, inputs: _OneOrMore(tf.Tensor), is_training: tf.Tensor) -> _OneOrMore[tf.Tensor]:
+    def apply(self, inputs: _OneOrMore(tf.Tensor), is_training: tf.Tensor) -> _OneOrMore(tf.Tensor):
         params = self.params.copy()
         params['initializer'] = params['initializer']()
         n_units = params.pop('n_units')
