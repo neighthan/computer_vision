@@ -5,7 +5,8 @@ from typing import Union, Sequence, Optional
 _OneOrMore = lambda type_: Union[type_, Sequence[type_]]
 
 _activations = {
-    'relu': tf.nn.relu
+    'relu': tf.nn.relu,
+    'tanh': tf.nn.tanh
 }
 
 _layers = {
@@ -39,6 +40,7 @@ class _Layer(object):
         :param is_training:
         :return:
         """
+
         params = self.params.copy()
         if 'kernel_initializer' in params.keys():
             params['kernel_initializer'] = _initializers[params['kernel_initializer']]()
@@ -188,9 +190,9 @@ class FlattenLayer(_Layer):
 
 
 class DenseLayer(_Layer):
-    def __init__(self, units:int, activation: str='relu', batch_norm: bool=True):
+    def __init__(self, n_units:int, activation: str='relu', batch_norm: bool=True):
         self.params = dict(
-            units=units,
+            units=n_units,
             activation=_activations[activation],
             kernel_initializer='variance_scaling_initializer'
         )
@@ -214,6 +216,74 @@ class DropoutLayer(_Layer):
         params['training'] = is_training
 
         return self.layer(inputs, **params)
+
+
+class LSTMLayer(_Layer):
+    """
+    TODO: is batchnorm between LSTM (or recurrent layers in general) a (good) thing? What about just between LSTM and FC?
+    """
+    def __init__(self, n_units: _OneOrMore(int), activation: str='tanh', ret: str='output', last_only: bool=True):
+        """
+
+        :param ret: what to return from the LSTM layer: "state", "output", or "both" (as a two tensor tuple)
+        """
+        self.params = dict(
+            n_units=n_units,
+            activation=_activations[activation],
+            initializer=tf.contrib.layers.variance_scaling_initializer
+        )
+        self.ret = ret
+        self.last_only = last_only
+
+    @staticmethod
+    def length(sequence):
+        """
+        Computes the length of a tensor; for use with a dynamic rnn
+        """
+        used = tf.sign(tf.reduce_max(tf.abs(sequence), reduction_indices=2))
+        length = tf.reduce_sum(used, reduction_indices=1)
+        return tf.cast(length, tf.int32)
+
+    @staticmethod
+    def get_last_outputs(n_output_features: int, outputs: tf.Tensor, lengths, output_name: Optional[str]=None):
+        # from https://github.com/aymericdamien/TensorFlowExamples/blob/master/examples/3_NeuralNetworks/dynamic_rnn.py
+        # TensorFlow doesn't support advanced indexing yet; for each sample, this gets its length and gets the
+        # last (real) output
+
+        n_seqs, max_seq_len = tf.shape(outputs)[0:2]
+
+        index = tf.range(0, n_seqs) * max_seq_len + (lengths - 1)
+
+        outputs = tf.gather(tf.reshape(outputs, [-1, n_output_features]), index) # flatten time dimension, select proper timestep for each seq
+        outputs = tf.reshape(outputs, (-1, out_dim), name=output_name) # so TF has explicit shape information about this tensor
+        return outputs
+
+    def apply(self, inputs: _OneOrMore(tf.Tensor), is_training: tf.Tensor) -> _OneOrMore[tf.Tensor]:
+        params = self.params.copy()
+        params['initializer'] = params['initializer']()
+        n_units = params.pop('n_units')
+        cells = [tf.contrib.rnn.LSTMCell(n_units[i], **params) for i in range(len(n_units))]
+
+        lengths = LSTMLayer.length(inputs)
+        output, state = tf.nn.dynamic_rnn(cells, inputs, dtype=tf.float32, sequence_length=lengths)
+
+        if self.last_only:
+            outputs = []
+            if self.ret in ['state', 'both']:
+                outputs.append(LSTMLayer.get_last_outputs(n_units[-1], state, lengths, 'lstm_out'))
+
+            if self.ret in ['output', 'both']:
+                outputs.append(LSTMLayer.get_last_outputs(n_units[-1], output, lengths, 'lstm_out'))
+
+            outputs = outputs if len(outputs) > 1 else outputs[0]
+            return outputs
+        else:
+            if self.ret == 'state':
+                return state
+            elif self.ret == 'output':
+                return output
+            else:
+                return state, output
 
 
 class LayerModule(_Layer):
