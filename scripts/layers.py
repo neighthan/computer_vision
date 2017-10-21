@@ -156,6 +156,11 @@ class BranchedLayer(_Layer):
                 outputs.append(inputs[i])
         return outputs
 
+    def __eq__(self, other):
+        if type(other) is not BranchedLayer:
+            return False
+        return self.layers == other.layers
+
 
 class MergeLayer(_Layer):
     """
@@ -177,6 +182,11 @@ class MergeLayer(_Layer):
         :returns:
         """
         return self.layer(flatten(inputs), **self.params)
+
+    def __eq__(self, other):
+        if type(other) is not MergeLayer:
+            return False
+        return self.params == other.params
 
 
 class FlattenLayer(_Layer):
@@ -202,6 +212,11 @@ class DenseLayer(_Layer):
     def layer(self):
         return _layers['dense']
 
+    def __eq__(self, other):
+        if type(other) is not DenseLayer:
+            return False
+        return self.params == other.params and self.batch_norm == other.batch_norm
+
 
 class DropoutLayer(_Layer):
     def __init__(self, rate:float):
@@ -222,18 +237,22 @@ class LSTMLayer(_Layer):
     """
     TODO: is batchnorm between LSTM (or recurrent layers in general) a (good) thing? What about just between LSTM and FC?
     """
-    def __init__(self, n_units: _OneOrMore(int), activation: str='tanh', ret: str='output', last_only: bool=True):
+    def __init__(self, n_units: _OneOrMore(int), activation: str='tanh', ret: str='output', last_only: bool=True,
+                 scope: str='lstm'):
         """
 
         :param ret: what to return from the LSTM layer: "state", "output", or "both" (as a two tensor tuple)
         """
+
+        n_units = n_units if type(n_units) in (list, tuple) else [n_units]
         self.params = dict(
-            n_units=n_units,
             activation=_activations[activation],
             initializer=tf.contrib.layers.variance_scaling_initializer
         )
+        self.n_units = n_units
         self.ret = ret
         self.last_only = last_only
+        self.scope = scope
 
     @staticmethod
     def length(sequence):
@@ -258,32 +277,38 @@ class LSTMLayer(_Layer):
         outputs = tf.reshape(outputs, (-1, out_dim), name=output_name) # so TF has explicit shape information about this tensor
         return outputs
 
-    def apply(self, inputs: _OneOrMore(tf.Tensor), is_training: tf.Tensor) -> _OneOrMore[tf.Tensor]:
+    def apply(self, inputs: _OneOrMore(tf.Tensor), is_training: tf.Tensor) -> _OneOrMore(tf.Tensor):
         params = self.params.copy()
         params['initializer'] = params['initializer']()
-        n_units = params.pop('n_units')
-        cells = [tf.contrib.rnn.LSTMCell(n_units[i], **params) for i in range(len(n_units))]
 
-        lengths = LSTMLayer.length(inputs)
-        output, state = tf.nn.dynamic_rnn(cells, inputs, dtype=tf.float32, sequence_length=lengths)
+        with tf.variable_scope(self.scope):
+            cells = tf.contrib.rnn.MultiRNNCell([tf.contrib.rnn.LSTMCell(n_units, **params) for n_units in self.n_units])
 
-        if self.last_only:
-            outputs = []
-            if self.ret in ['state', 'both']:
-                outputs.append(LSTMLayer.get_last_outputs(n_units[-1], state, lengths, 'lstm_out'))
+            lengths = LSTMLayer.length(inputs)
+            output, state = tf.nn.dynamic_rnn(cells, inputs, dtype=tf.float32, sequence_length=lengths)
 
-            if self.ret in ['output', 'both']:
-                outputs.append(LSTMLayer.get_last_outputs(n_units[-1], output, lengths, 'lstm_out'))
+            if self.last_only:
+                outputs = []
+                if self.ret in ['state', 'both']:
+                    outputs.append(LSTMLayer.get_last_outputs(n_units[-1], state, lengths, 'lstm_out'))
 
-            outputs = outputs if len(outputs) > 1 else outputs[0]
-            return outputs
-        else:
-            if self.ret == 'state':
-                return state
-            elif self.ret == 'output':
-                return output
+                if self.ret in ['output', 'both']:
+                    outputs.append(LSTMLayer.get_last_outputs(n_units[-1], output, lengths, 'lstm_out'))
+
+                outputs = outputs if len(outputs) > 1 else outputs[0]
+                return outputs
             else:
-                return state, output
+                if self.ret == 'state':
+                    return state
+                elif self.ret == 'output':
+                    return output
+                else:
+                    return state, output
+
+    def __eq__(self, other):
+        if type(other) is not LSTMLayer:
+            return False
+        return self.n_units == other.n_units and self.params == other.params and self.ret == other.ret and self.last_only == other.last_only and self.scope == other.scope
 
 
 class LayerModule(_Layer):
