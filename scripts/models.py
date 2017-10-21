@@ -7,7 +7,7 @@ import time
 import os
 import sys
 from utils import tf_init, get_next_run_num, get_abs_path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Sequence
 from layers import ConvLayer, MaxPoolLayer, AvgPoolLayer, BranchedLayer, MergeLayer, LayerModule, FlattenLayer,\
     DenseLayer, DropoutLayer, GlobalAvgPoolLayer, GlobalMaxPoolLayer, _Layer
 import warnings
@@ -82,8 +82,7 @@ class BaseNN(object):
         np.random.seed(self.random_state)
 
     def __check_graph__(self):
-        required_attrs = ['loss_op', 'train_op', 'inputs_p', 'labels_p', 'probs_p', 'accuracy1', 'accuracy5', 'predict',
-                          'is_training']
+        required_attrs = ['loss_op', 'train_op', 'inputs_p', 'labels_p', 'probs_p', 'predict', 'is_training']
         for attr in required_attrs:
             getattr(self, attr)
 
@@ -154,7 +153,7 @@ class BaseNN(object):
         self.dev_writer.add_summary(tf.Summary(
             value=[tf.Summary.Value(tag='acc5', simple_value=dev_acc5)]), epoch)
 
-    def train(self, train_inputs, train_labels, dev_inputs, dev_labels, n_epochs=100, max_patience=5, in_notebook=False):
+    def train(self, train_inputs, train_labels, dev_inputs, dev_labels, n_epochs=100, max_patience=5, verbose=0):
         """
         The best epoch is the one where the accuracy on the dev set is the highest. "best" in reference to other metrics
         (e.g. dev accuracy@5) means the value of that metric at the best epoch.
@@ -164,25 +163,28 @@ class BaseNN(object):
         :param dev_labels:
         :param n_epochs:
         :param max_patience:
-        :param in_notebook:
+        :param verbose: 0 to print nothing, 1 to use tqdm's range for terminal, 2 for notebook
         :returns: best_dev_acc1, best_dev_acc5, best_train_loss, best_dev_loss, train_time, run_num
         """
 
         start_time = time.time()
 
-        if in_notebook:
+        if verbose == 2:
             epoch_range = lambda *args: tnrange(*args, unit='epoch')
             batch_range = lambda *args: tnrange(*args, unit='batch', leave=False)
-        else:
+        elif verbose == 1:
             epoch_range = lambda *args: trange(*args, unit='epoch')
             batch_range = lambda *args: trange(*args, unit='batch', leave=False)
+        else:
+            epoch_range = range
+            batch_range = range
 
         best_train_loss = best_dev_loss = np.inf
         best_dev_acc1 = best_dev_acc5 = early_stop_acc = 0
         patience = max_patience
         train_batches_per_epoch = int(np.ceil(len(train_inputs) / self.batch_size))
         dev_batches_per_epoch   = int(np.ceil(len(dev_inputs) / self.batch_size))
-        
+
         train_idx = list(range(len(train_labels)))
         dev_idx = list(range(len(dev_labels)))
 
@@ -198,7 +200,8 @@ class BaseNN(object):
                                                                         self.labels_p: train_labels[batch_idx],
                                                                         self.is_training: True})
                 train_loss.append(loss)
-                batches.set_description('{:.3f}'.format(loss))
+                if verbose:
+                    batches.set_description('{:.3f}'.format(loss))
 
             dev_loss = []
             preds = []
@@ -206,10 +209,11 @@ class BaseNN(object):
             for batch in batches:
                 batch_idx = dev_idx[batch * self.batch_size : (batch + 1) * self.batch_size]
                 loss, pred = self.sess.run([self.loss_op, self.predict], {self.inputs_p: dev_inputs[batch_idx],
-                                                            self.labels_p: dev_labels[batch_idx]})
+                                                                          self.labels_p: dev_labels[batch_idx]})
                 dev_loss.append(loss)
                 preds.append(pred)
-                batches.set_description('{:.3f}'.format(loss))
+                if verbose:
+                    batches.set_description('{:.3f}'.format(loss))
 
             train_loss = np.mean(train_loss)
             dev_loss = np.mean(dev_loss)
@@ -242,7 +246,8 @@ class BaseNN(object):
                     break
 
             runtime = int((time.time() - start_time) / 60)
-            epochs.set_description("Epoch {}. Train Loss: {:.3f}. Dev loss: {:.3f}. Runtime {}."\
+            if verbose:
+                epochs.set_description("Epoch {}. Train Loss: {:.3f}. Dev loss: {:.3f}. Runtime {}."\
                   .format(epoch + 1, best_train_loss, best_dev_loss, runtime))
 
         train_time = (time.time() - start_time) / 60 # in minutes
@@ -392,14 +397,17 @@ class PretrainedCNN(BaseNN):
 
 class CNN(BaseNN):
     """
+
     """
     def __init__(
         self,
         layers:        Optional[List[_Layer]] = None,
+        n_regress_tasks:                  int = 0,
+        n_classes:              Sequence[int] = (0,),
+        task_names:   Optional[Sequence[str]] = None,
         img_width:                        int = 128,
         img_height:                       int = 128,
         n_channels:                       int = 3,
-        n_classes:                        int = 2,
         log_fname:                        str = '{}/models/log.h5'.format(miniplaces),
         log_key:                          str = 'default',
         data_params: Optional[Dict[str, Any]] = None,
@@ -412,32 +420,41 @@ class CNN(BaseNN):
         batch_size:                       int = 64,
         record:                          bool = True,
         random_state:                     int = 521,
+        add_scaling:                      bool = False
     ):
         new_run = run_num == -1
         super(CNN, self).__init__(log_fname, log_key, config, run_num, batch_size, record, random_state)
 
-        param_names = ['img_width', 'img_height', 'n_channels', 'n_classes', 'l2_lambda', 'learning_rate',
-                       'beta1', 'beta2', 'random_state', 'batch_size', 'layers']
-
+        param_names = ['img_width', 'img_height', 'n_channels', 'n_classes', 'n_regress_tasks', 'task_names', 'l2_lambda',
+                       'learning_rate', 'beta1', 'beta2', 'random_state', 'batch_size', 'layers', 'add_scaling']
+        if type(n_classes) == int:
+            n_classes = [n_classes]
         if data_params is None:
             data_params = {}
+        if task_names is None:
+            task_names = [str(i) for i in range(n_regress_tasks + len(n_classes))]
 
         if new_run:
             assert type(layers) is not None
             self.layers = layers
+            self.n_regress_tasks = n_regress_tasks
+            self.n_classes = n_classes
+            self.task_names = task_names
             self.img_height = img_height
             self.img_width = img_width
             self.n_channels = n_channels
-            self.n_classes = n_classes
             self.l2_lambda = l2_lambda
             self.learning_rate = learning_rate
             self.beta1 = beta1
             self.beta2 = beta2
+            self.add_scaling = add_scaling
         else:
             log = pd.read_hdf(log_fname, log_key)
             for param in param_names:
                 p = log.loc[run_num, param]
                 self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
+
+        self.n_class_tasks = len(self.n_classes)
 
         self.params.update(data_params)
         self.params.update({param: self.__getattribute__(param) for param in param_names})
@@ -456,21 +473,46 @@ class CNN(BaseNN):
 
         self.graph = tf.Graph()
         with self.graph.as_default():
-            self.inputs_p_raw = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p_raw')
-            self.inputs_p = self.inputs_p_raw / 255
-            self.labels_p = tf.placeholder(tf.int32, shape=None, name='labels_p')
+            self.inputs_p = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p')
             self.is_training = tf.placeholder_with_default(False, [])
 
-            hidden = self.inputs_p
+            if self.add_scaling:
+                mean, std = tf.nn.moments(self.inputs_p, axes=[1, 2], keep_dims=True)
+                hidden = (self.inputs_p - mean) / tf.sqrt(std)
+            else:
+                hidden = self.inputs_p
 
             for layer in self.layers:
                 hidden = layer.apply(hidden, is_training=self.is_training)
 
-            self.logits = tf.layers.dense(hidden, self.n_classes, activation=None, name='logits')
+            self.predict = {}
+            self.labels_p = {}
+            self.loss_ops = {}
 
-            self.predict = tf.nn.softmax(self.logits, name='predict')
-            self.loss_op = tf.losses.sparse_softmax_cross_entropy(self.labels_p, self.logits, scope='xent')
+            if self.n_class_tasks > 0:
+                self.logits = {}
+                self.probs_p = {}
+                self.accuracy = {}
+                for i in range(self.n_class_tasks):
+                    name = self.task_names[i]
+                    with tf.variable_scope(f"class_{name}"):
+                        self.labels_p[name] = tf.placeholder(tf.int32, shape=None, name='labels_p')
+                        self.logits[name] = tf.layers.dense(hidden, self.n_classes[i], activation=None, name='logits')
 
+                        self.predict[name] = tf.nn.softmax(self.logits[name], name='predict')
+                        self.loss_ops[name] = tf.losses.sparse_softmax_cross_entropy(self.labels_p[name], self.logits[name], scope='xent')
+
+                        self.probs_p[name] = tf.placeholder(tf.float32, shape=(None, self.n_classes[i]), name='probs_p')
+                        self.accuracy[name] = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p[name], self.labels_p[name], k=1), tf.float32))
+
+            for i in range(self.n_class_tasks, self.n_class_tasks + self.n_regress_tasks):
+                name = self.task_names[i]
+                with tf.variable_scope(f"regress_{name}"):
+                    self.labels_p[name] = tf.placeholder(tf.float32, shape=None, name='labels_p')
+                    self.predict[name] = tf.layers.dense(hidden, 1, activation=None)
+                    self.loss_ops[name] = tf.losses.mean_squared_error(self.labels_p[name], self.predict[name], scope='mse')
+
+            self.loss_op = tf.add_n(list(self.loss_ops.values()))
             if self.l2_lambda:
                 self.loss_op = tf.add(self.loss_op, self.l2_lambda * tf.reduce_sum([tf.nn.l2_loss(var) for var in tf.trainable_variables()]), name='loss')
 
@@ -478,18 +520,15 @@ class CNN(BaseNN):
             self.global_step = tf.Variable(0, trainable=False)
             self.decayed_lr = tf.train.exponential_decay(self.learning_rate, self.global_step,
                                                          decay_steps=200000 // self.batch_size, decay_rate=0.94)
-            self.optimizer = tf.train.RMSPropOptimizer(self.decayed_lr, epsilon=1)
+            self.optimizer = tf.train.RMSPropOptimizer(self.decayed_lr)#, epsilon=1)
             self.train_op = self.optimizer.minimize(self.loss_op, global_step=self.global_step, name='train_op')
-
-            self.probs_p = tf.placeholder(tf.float32, shape=(None, self.n_classes), name='probs_p')
-            self.accuracy1 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=1), tf.float32))
-            self.accuracy5 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=5), tf.float32))
 
             self.saver = tf.train.Saver()
             self.global_init = tf.global_variables_initializer()
 
         self.__add_savers_and_writers__()
         self.__check_graph__()
+
 
 def inception(
         img_width:                        int = 128,
@@ -556,7 +595,7 @@ def inception(
         DropoutLayer(rate=0.8)
     ]
 
-    return CNN(layers=layers, img_width=img_width, img_height=img_height, n_channels=n_channels, n_classes=n_classes,
+    return CNN(layers=layers, img_width=img_width, img_height=img_height, n_channels=n_channels, n_classes=[n_classes],
                log_fname=log_fname, log_key=log_key, data_params=data_params, l2_lambda=l2_lambda,
                learning_rate=learning_rate, beta1=beta1, beta2=beta2, config=config, run_num=run_num,
                batch_size=batch_size, record=record, random_state=random_state)
