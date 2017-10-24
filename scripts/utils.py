@@ -72,13 +72,15 @@ def get_next_run_num(run_num_file, verbose=True):
     return run_num
 
 
-def tf_init(device='', n_gpus=4):
+def tf_init(device: str='', n_gpus: int=4, tf_logging_verbosity: str='1') -> tf.ConfigProto:
     """
     Runs common operations at start of TensorFlow:
-      - sets logging verbosity to warn
+      - sets logging verbosity
       - sets CUDA visible devices to `device` or, if `device` is '', to the GPU with the most free memory
       - creates a TensorFlow config which allows for GPU memory growth and for soft placement
-    :param str device: which GPU to use
+    :param device: which GPU to use
+    :param n_gpus: number of GPUs on this machine; only needed if device isn't given
+    :param tf_logging_verbosity: 0 for everything; 1 to remove info; 2 to remove warnings; 3 to remove errors
     :returns: the aforementioned TensorFlow config
     """
 
@@ -86,6 +88,9 @@ def tf_init(device='', n_gpus=4):
         os.environ['CUDA_VISIBLE_DEVICES'] = device
     else:
         os.environ['CUDA_VISIBLE_DEVICES'] = get_best_gpu(n_gpus=n_gpus)
+
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = tf_logging_verbosity
+
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
     config.allow_soft_placement = True
