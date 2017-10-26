@@ -222,7 +222,7 @@ class BaseNN(object):
         if dataset:
             self.sess.run(self.data_init_op, self._get_feed_dict(inputs, labels))
 
-        if not dataset and idx is None:
+        if idx is None:
             idx = list(range(len(next(iter(inputs.values())))))
         if range_ is None:
             range_ = range(int(np.ceil(len(idx) / self.batch_size)))
@@ -801,7 +801,7 @@ class RNN(BaseNN):
         #  TODO: make check_graph general enough to work (acc1 and acc5 need to be removed from BaseNN
         # need to implement a more flexible metrics like {'acc1': (tensor, 'how to combine when batching'), ...}
 
-    def predict_proba(self, inputs, labels, final_only=False) -> pd.DataFrame:
+    def predict_proba(self, inputs, labels, final_only=False) -> Union[Dict[str, pd.DataFrame], pd.DataFrame]:
         """
         Generates predictions (predicted 'probabilities', not binary labels) on the test set
         :param labels: these are also needed because the data iterator feeds in batches of inputs and labels.
@@ -809,19 +809,28 @@ class RNN(BaseNN):
         :returns: array of predicted probabilities of being positive for each sample in the test set
         """
 
-        if self.n_classes > 2:
-            assert False, "Only implemented for 2 classes so far. Otherwise, output is 3D (patients x timesteps x classes)"
-
-        self.sess.run(self.data_init_op, self._get_feed_dict(inputs, labels))
-        predictions = []
-        for _ in range(self._batches_per_epoch(inputs)):
-            predictions.append(self.sess.run(self.predict)[:, :, 1])
-        predictions = np.concatenate(predictions)
-
         if final_only:
             assert False, "Need to implement this"
 
-        return pd.DataFrame(predictions, index=labels.index)
+        if self.n_classes[0] > 2:
+            assert False, "Only implemented for 2 classes so far. Otherwise, output is 3D (patients x timesteps x classes)"
+
+        if type(inputs) is not dict:
+            inputs = {'default': inputs}
+        if type(labels) is not dict:
+            labels = {'default': labels}
+
+        self.sess.run(self.data_init_op, self._get_feed_dict(inputs, labels))
+
+        # predictions = []
+        # for _ in range(self._batches_per_epoch(inputs)):
+        #     predictions.append(self.sess.run(self.predict)[:, :, 1])
+        # predictions = np.concatenate(predictions)
+
+        predictions = self._batch(self.predict, inputs, labels, dataset=self.uses_dataset)
+        predictions = pd.DataFrame(np.concatenate(predictions[0])[:, :, 1], index=labels['default'].index)
+
+        return predictions
 
     def score(self, inputs, labels, metric='auc'):
         if metric != 'auc':
