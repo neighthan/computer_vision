@@ -81,6 +81,7 @@ class BaseNN(object):
 
         if run_num == -1:
             assert type(layers) is not None
+            assert n_regress_tasks > 0 or len(n_classes) > 0
             self.run_num         = get_next_run_num(f'{models_dir}/run_num.pkl') if record else 0
             self.layers          = layers
             self.n_regress_tasks = n_regress_tasks
@@ -562,7 +563,7 @@ class CNN(BaseNN):
             self.beta2         = beta2
             self.add_scaling   = add_scaling
         else:
-            log = pd.read_hdf(log_fname, log_key)
+            log = pd.read_hdf(self.log_fname, log_key)
             for param in param_names:
                 p = log.loc[run_num, param]
                 self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
@@ -680,7 +681,7 @@ class RNN(BaseNN):
         decay_learning_rate:              bool = False
     ):
 
-        assert n_regress_tasks == 0 and type(n_classes) == int, "Multi-task RNN not yet supported"
+        assert n_regress_tasks == 0 and (type(n_classes) == int or len(n_classes) <= 1), "Only single-task classification RNN is supported now"
 
         new_run = run_num == -1
         super().__init__(layers, models_dir, log_key, n_regress_tasks, n_classes, task_names, config, run_num,
@@ -759,7 +760,7 @@ class RNN(BaseNN):
             for layer in self.layers:
                 hidden = layer.apply(hidden, is_training=self.is_training)
 
-            self.logits = tf.layers.dense(hidden, self.n_classes, activation=None, name='logits')
+            self.logits = tf.layers.dense(hidden, self.n_classes[0], activation=None, name='logits')
             self.predict = tf.nn.softmax(self.logits, name='predict')
             # TODO: do we need all of the features to tell the length? If so, that will be an issue inside of the
             # separate LSTM modules. We should check this on the actual data and, if needed, find a better way to
