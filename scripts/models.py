@@ -337,13 +337,14 @@ class BaseNN(object):
 
             ret = self._batch([self.loss_op, self.train_op], train_inputs, train_labels, batches, train_idx,
                                  is_training=True, dataset=self.uses_dataset)
-            train_loss = np.array(ret)[:, 0].mean()
+            train_loss = np.array(ret)[0, :].mean()
 
             batches = batch_range(dev_batches_per_epoch)
             ret = self._batch(metric_ops, dev_inputs, dev_labels, batches, dev_idx, dataset=self.uses_dataset)
+            ret = np.array(ret)
 
-            dev_loss = np.array(ret)[:, -1].mean()
-            dev_metrics = ret[-1][:-1] # last values, because metrics are streaming
+            dev_loss = ret[-1, :].mean()
+            dev_metrics = ret[:-1, -1] # last values, because metrics are streaming
             dev_metrics = {metric_names[i]: dev_metrics[i] for i in range(len(metric_names))}
             dev_metrics.update({'dev_loss': dev_loss})
             early_stop_metric = dev_metrics[self.early_stop_metric_name]
@@ -743,10 +744,10 @@ class RNN(BaseNN):
             self.inputs_p = {name: tf.placeholder(tf.float32, shape=(None, self.n_timesteps, self.n_features[name]),
                                                   name=f'inputs_p_{name}') for name in group_names}
             # TODO: repeat labels across n_timesteps instead of taking them in as that shape
-            self.labels_p = tf.placeholder(tf.int32, shape=(None, 1), name='labels_p')
+            self.labels_p = {'default': tf.placeholder(tf.int32, shape=(None, 1), name='labels_p')}
             self.is_training = tf.placeholder_with_default(False, [])
 
-            labels = tf.tile(self.labels_p, [1, self.n_timesteps])
+            labels = tf.tile(self.labels_p['default'], [1, self.n_timesteps])
             data = tf.contrib.data.Dataset.from_tensor_slices(([self.inputs_p[name] for name in group_names], labels))
             self.data = data.batch(self.batch_size)
 
