@@ -51,6 +51,9 @@ class _Layer(object):
             output = tf.layers.batch_normalization(output, training=is_training)
         return output
 
+    def __repr__(self):
+        return f"{self.__class__} [{self.params}]"
+
 
 class ConvLayer(_Layer):
     def __init__(self, n_filters:int, kernel_size:_OneOrMore(int), strides: int=1,
@@ -143,6 +146,7 @@ class BranchedLayer(_Layer):
         :param is_training:
         :return:
         """
+
         if type(inputs) is not list:
             inputs = [inputs] * len(self.layers)
         else:
@@ -160,6 +164,9 @@ class BranchedLayer(_Layer):
         if type(other) is not BranchedLayer:
             return False
         return self.layers == other.layers
+
+    def __repr__(self):
+        return "Branched [\n\t{}\n]".format('\n\t'.join([layer.__repr__() for layer in self.layers]))
 
 
 class MergeLayer(_Layer):
@@ -187,6 +194,9 @@ class MergeLayer(_Layer):
         if type(other) is not MergeLayer:
             return False
         return self.params == other.params
+
+    def __repr__(self):
+        return f"Merge[axis={self.params['axis']}]"
 
 
 class FlattenLayer(_Layer):
@@ -216,6 +226,9 @@ class DenseLayer(_Layer):
         if type(other) is not DenseLayer:
             return False
         return self.params == other.params and self.batch_norm == other.batch_norm
+
+    def __repr__(self):
+        return f"Dense[{self.params['units']}, {self.params['activation'].__name__}]"
 
 
 class DropoutLayer(_Layer):
@@ -269,12 +282,13 @@ class LSTMLayer(_Layer):
         # TensorFlow doesn't support advanced indexing yet; for each sample, this gets its length and gets the
         # last (real) output
 
-        n_seqs, max_seq_len = tf.shape(outputs)[0:2]
+        n_seqs = tf.shape(outputs)[0]
+        max_seq_len = tf.shape(outputs)[1]
 
         index = tf.range(0, n_seqs) * max_seq_len + (lengths - 1)
 
         outputs = tf.gather(tf.reshape(outputs, [-1, n_output_features]), index) # flatten time dimension, select proper timestep for each seq
-        outputs = tf.reshape(outputs, (-1, out_dim), name=output_name) # so TF has explicit shape information about this tensor
+        outputs = tf.reshape(outputs, (-1, n_output_features), name=output_name) # so TF has explicit shape information about this tensor
         return outputs
 
     def apply(self, inputs: _OneOrMore(tf.Tensor), is_training: tf.Tensor) -> _OneOrMore(tf.Tensor):
@@ -290,13 +304,12 @@ class LSTMLayer(_Layer):
             if self.last_only:
                 outputs = []
                 if self.ret in ['state', 'both']:
-                    outputs.append(LSTMLayer.get_last_outputs(n_units[-1], state, lengths, 'lstm_out'))
+                    outputs.append(LSTMLayer.get_last_outputs(self.n_units[-1], state, lengths, 'lstm_out'))
 
                 if self.ret in ['output', 'both']:
-                    outputs.append(LSTMLayer.get_last_outputs(n_units[-1], output, lengths, 'lstm_out'))
+                    outputs.append(LSTMLayer.get_last_outputs(self.n_units[-1], output, lengths, 'lstm_out'))
 
-                outputs = outputs if len(outputs) > 1 else outputs[0]
-                return outputs
+                return outputs if len(outputs) > 1 else outputs[0]
             else:
                 if self.ret == 'state':
                     return state
@@ -309,6 +322,9 @@ class LSTMLayer(_Layer):
         if type(other) is not LSTMLayer:
             return False
         return self.n_units == other.n_units and self.params == other.params and self.ret == other.ret and self.last_only == other.last_only and self.scope == other.scope
+
+    def __repr__(self):
+        return f"LSTM[{self.n_units}, {self.params['activation'].__name__}]"
 
 
 class LayerModule(_Layer):
