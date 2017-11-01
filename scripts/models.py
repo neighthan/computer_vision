@@ -167,8 +167,8 @@ class BaseNN(object):
     @staticmethod
     def _metric_improved(old_metric: _numeric, new_metric: _numeric, significant: bool=False, threshold: float=.01) -> bool:
         """
-        By default, improving is *increasing*.
-        Override this if you need a decrease in the metric to be an improvement (to use '<' and '-' instead of '>' and '+'
+        By default, improving is *decreasing* (e.g. for a loss function).
+        Override this if you need an increasein the metric to be an improvement (to use '>' and '+' instead of '<' and '-'
         :param old_metric:
         :param new_metric:
         :param significant:
@@ -177,9 +177,9 @@ class BaseNN(object):
         """
 
         if significant:
-            return new_metric > (1 + threshold) * old_metric
+            return new_metric < (1 - threshold) * old_metric
         else:
-            return new_metric > old_metric
+            return new_metric < old_metric
 
     def _get_feed_dict(self, inputs: Dict[str, np.ndarray], labels: Optional[Dict[str, np.ndarray]]=None) ->\
             Dict[tf.placeholder, np.ndarray]:
@@ -376,7 +376,7 @@ class BaseNN(object):
         if self.record:
             best_metrics['train_complete'] = True
             self._log(best_metrics)
-            self.saver.restore(self.sess, os.path.join(self.log_dir, 'model.ckpt')) # reload best epoch
+            self.saver.restore(self.sess, os.path.join(self.log_dir, 'model.ckpt'))  # reload best epoch
 
         return best_metrics
 
@@ -390,7 +390,7 @@ class BaseNN(object):
             inputs = {'default': inputs}
 
         predictions = self._batch([self.predict[name] for name in self.task_names], inputs, dataset=self.uses_dataset) # pd.DataFrame
-        predictions = {name: pd.DataFrame(np.concatenate(predictions[i])) for name, i in enumerate(self.task_names)}
+        predictions = {name: pd.DataFrame(np.concatenate(predictions[i])) for i, name in enumerate(self.task_names)}
 
         if len(predictions.keys()) == 1 and next(iter(predictions)) == 'default':
             return predictions['default']
@@ -578,7 +578,6 @@ class CNN(BaseNN):
 
         self._build_graph()
 
-
     def _build_graph(self):
         """
         If self.log_dir contains a previously trained model, then the graph from that run is loaded for further
@@ -620,7 +619,7 @@ class CNN(BaseNN):
                         self.predict[name] = tf.nn.softmax(self.logits[name], name='predict')
                         self.loss_ops[name] = tf.losses.sparse_softmax_cross_entropy(self.labels_p[name], self.logits[name], scope='xent')
 
-                        self.accuracy[name] = tf.metrics.accuracy(self.labels_p[name], tf.arg_max(self.predict[name], 1))
+                        _, self.accuracy[name] = tf.metrics.accuracy(self.labels_p[name], tf.arg_max(self.predict[name], 1))
 
                         self.metrics.update({f'acc_{name}': self.accuracy[name] for name in self.accuracy})
 
@@ -654,14 +653,15 @@ class CNN(BaseNN):
             else:
                 self.train_op = {task: self.optimizer.minimize(self.loss_ops[task], global_step=self.global_step, name=f"train_op_{task}")
                                  for task in self.loss_ops}
+                assert False
                 # TODO: change train to work with this
-
 
             self.early_stop_metric_name = 'dev_loss'
             self.uses_dataset = False
 
             self.saver = tf.train.Saver()
             self.global_init = tf.global_variables_initializer()
+            self.local_init = tf.local_variables_initializer()
 
         self._add_savers_and_writers()
         self._check_graph()
@@ -855,13 +855,6 @@ class RNN(BaseNN):
         else:
             n_batches = int(np.ceil(len(data) / self.batch_size))
         return n_batches
-
-    @staticmethod
-    def _metric_improved(old_metric: _numeric, new_metric: _numeric, significant: bool=False, threshold: float=.01) -> bool:
-        if significant:
-            return new_metric < (1 - threshold) * old_metric
-        else:
-            return new_metric < old_metric
 
     def _build_graph(self) -> None:
         """
