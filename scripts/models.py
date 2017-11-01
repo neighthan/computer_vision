@@ -81,6 +81,7 @@ class BaseNN(object):
 
         if run_num == -1:
             assert type(layers) is not None
+            assert n_regress_tasks > 0 or len(n_classes) > 0
             self.run_num         = get_next_run_num(f'{models_dir}/run_num.pkl') if record else 0
             self.layers          = layers
             self.n_regress_tasks = n_regress_tasks
@@ -221,7 +222,7 @@ class BaseNN(object):
         if dataset:
             self.sess.run(self.data_init_op, self._get_feed_dict(inputs, labels))
 
-        if not dataset and idx is None:
+        if idx is None:
             idx = list(range(len(next(iter(inputs.values())))))
         if range_ is None:
             range_ = range(int(np.ceil(len(idx) / self.batch_size)))
@@ -336,13 +337,14 @@ class BaseNN(object):
 
             ret = self._batch([self.loss_op, self.train_op], train_inputs, train_labels, batches, train_idx,
                                  is_training=True, dataset=self.uses_dataset)
-            train_loss = np.array(ret)[:, 0].mean()
+            train_loss = np.array(ret)[0, :].mean()
 
             batches = batch_range(dev_batches_per_epoch)
             ret = self._batch(metric_ops, dev_inputs, dev_labels, batches, dev_idx, dataset=self.uses_dataset)
+            ret = np.array(ret)
 
-            dev_loss = np.array(ret)[:, -1].mean()
-            dev_metrics = ret[-1][:-1] # last values, because metrics are streaming
+            dev_loss = ret[-1, :].mean()
+            dev_metrics = ret[:-1, -1] # last values, because metrics are streaming
             dev_metrics = {metric_names[i]: dev_metrics[i] for i in range(len(metric_names))}
             dev_metrics.update({'dev_loss': dev_loss})
             early_stop_metric = dev_metrics[self.early_stop_metric_name]
@@ -567,7 +569,7 @@ class CNN(BaseNN):
             self.decay_learning_rate = decay_learning_rate
             self.combined_train_op   = combined_train_op
         else:
-            log = pd.read_hdf(log_fname, log_key)
+            log = pd.read_hdf(self.log_fname, log_key)
             for param in param_names:
                 p = log.loc[run_num, param]
                 self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
@@ -813,7 +815,7 @@ class RNN(BaseNN):
         decay_learning_rate:              bool = False
     ):
 
-        assert n_regress_tasks == 0 and type(n_classes) == int, "Multi-task RNN not yet supported"
+        assert n_regress_tasks == 0 and (type(n_classes) == int or len(n_classes) <= 1), "Only single-task classification RNN is supported now"
 
         new_run = run_num == -1
         super().__init__(layers, models_dir, log_key, n_regress_tasks, n_classes, task_names, config, run_num,
@@ -875,10 +877,10 @@ class RNN(BaseNN):
             self.inputs_p = {name: tf.placeholder(tf.float32, shape=(None, self.n_timesteps, self.n_features[name]),
                                                   name=f'inputs_p_{name}') for name in group_names}
             # TODO: repeat labels across n_timesteps instead of taking them in as that shape
-            self.labels_p = tf.placeholder(tf.int32, shape=(None, 1), name='labels_p')
+            self.labels_p = {'default': tf.placeholder(tf.int32, shape=(None, 1), name='labels_p')}
             self.is_training = tf.placeholder_with_default(False, [])
 
-            labels = tf.tile(self.labels_p, [1, self.n_timesteps])
+            labels = tf.tile(self.labels_p['default'], [1, self.n_timesteps])
             data = tf.contrib.data.Dataset.from_tensor_slices(([self.inputs_p[name] for name in group_names], labels))
             self.data = data.batch(self.batch_size)
 
@@ -892,7 +894,7 @@ class RNN(BaseNN):
             for layer in self.layers:
                 hidden = layer.apply(hidden, is_training=self.is_training)
 
-            self.logits = tf.layers.dense(hidden, self.n_classes, activation=None, name='logits')
+            self.logits = tf.layers.dense(hidden, self.n_classes[0], activation=None, name='logits')
             self.predict = tf.nn.softmax(self.logits, name='predict')
             # TODO: do we need all of the features to tell the length? If so, that will be an issue inside of the
             # separate LSTM modules. We should check this on the actual data and, if needed, find a better way to
@@ -932,7 +934,7 @@ class RNN(BaseNN):
         #  TODO: make check_graph general enough to work (acc1 and acc5 need to be removed from BaseNN
         # need to implement a more flexible metrics like {'acc1': (tensor, 'how to combine when batching'), ...}
 
-    def predict_proba(self, inputs, labels, final_only=False) -> pd.DataFrame:
+    def predict_proba(self, inputs, labels, final_only=False) -> Union[Dict[str, pd.DataFrame], pd.DataFrame]:
         """
         Generates predictions (predicted 'probabilities', not binary labels) on the test set
         :param labels: these are also needed because the data iterator feeds in batches of inputs and labels.
@@ -940,19 +942,28 @@ class RNN(BaseNN):
         :returns: array of predicted probabilities of being positive for each sample in the test set
         """
 
-        if self.n_classes > 2:
-            assert False, "Only implemented for 2 classes so far. Otherwise, output is 3D (patients x timesteps x classes)"
-
-        self.sess.run(self.data_init_op, self._get_feed_dict(inputs, labels))
-        predictions = []
-        for _ in range(self._batches_per_epoch(inputs)):
-            predictions.append(self.sess.run(self.predict)[:, :, 1])
-        predictions = np.concatenate(predictions)
-
         if final_only:
             assert False, "Need to implement this"
 
-        return pd.DataFrame(predictions, index=labels.index)
+        if self.n_classes[0] > 2:
+            assert False, "Only implemented for 2 classes so far. Otherwise, output is 3D (patients x timesteps x classes)"
+
+        if type(inputs) is not dict:
+            inputs = {'default': inputs}
+        if type(labels) is not dict:
+            labels = {'default': labels}
+
+        self.sess.run(self.data_init_op, self._get_feed_dict(inputs, labels))
+
+        # predictions = []
+        # for _ in range(self._batches_per_epoch(inputs)):
+        #     predictions.append(self.sess.run(self.predict)[:, :, 1])
+        # predictions = np.concatenate(predictions)
+
+        predictions = self._batch(self.predict, inputs, labels, dataset=self.uses_dataset)
+        predictions = pd.DataFrame(np.concatenate(predictions[0])[:, :, 1], index=labels['default'].index)
+
+        return predictions
 
     def score(self, inputs, labels, metric='auc'):
         if metric != 'auc':
