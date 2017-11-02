@@ -167,8 +167,8 @@ class BaseNN(object):
     @staticmethod
     def _metric_improved(old_metric: _numeric, new_metric: _numeric, significant: bool=False, threshold: float=.01) -> bool:
         """
-        By default, improving is *increasing*.
-        Override this if you need a decrease in the metric to be an improvement (to use '<' and '-' instead of '>' and '+'
+        By default, improving is *decreasing* (e.g. for a loss function).
+        Override this if you need an increasein the metric to be an improvement (to use '>' and '+' instead of '<' and '-'
         :param old_metric:
         :param new_metric:
         :param significant:
@@ -177,9 +177,9 @@ class BaseNN(object):
         """
 
         if significant:
-            return new_metric > (1 + threshold) * old_metric
+            return new_metric < (1 - threshold) * old_metric
         else:
-            return new_metric > old_metric
+            return new_metric < old_metric
 
     def _get_feed_dict(self, inputs: Dict[str, np.ndarray], labels: Optional[Dict[str, np.ndarray]]=None) ->\
             Dict[tf.placeholder, np.ndarray]:
@@ -376,7 +376,7 @@ class BaseNN(object):
         if self.record:
             best_metrics['train_complete'] = True
             self._log(best_metrics)
-            self.saver.restore(self.sess, os.path.join(self.log_dir, 'model.ckpt')) # reload best epoch
+            self.saver.restore(self.sess, os.path.join(self.log_dir, 'model.ckpt'))  # reload best epoch
 
         return best_metrics
 
@@ -390,7 +390,7 @@ class BaseNN(object):
             inputs = {'default': inputs}
 
         predictions = self._batch([self.predict[name] for name in self.task_names], inputs, dataset=self.uses_dataset) # pd.DataFrame
-        predictions = {name: pd.DataFrame(np.concatenate(predictions[i])) for name, i in enumerate(self.task_names)}
+        predictions = {name: pd.DataFrame(np.concatenate(predictions[i])) for i, name in enumerate(self.task_names)}
 
         if len(predictions.keys()) == 1 and next(iter(predictions)) == 'default':
             return predictions['default']
@@ -546,23 +546,28 @@ class CNN(BaseNN):
         learning_rate:                  float = 0.001,
         beta1:                          float = 0.9,
         beta2:                          float = 0.999,
-        add_scaling:                     bool = False
+        add_scaling:                     bool = False,
+        decay_learning_rate:             bool = False,
+        combined_train_op:               bool = True
     ):
         new_run = run_num == -1
         super().__init__(layers, models_dir, log_key, n_regress_tasks, n_classes, task_names, config, run_num,
                          batch_size, record, random_state, data_params)
 
-        param_names = ['img_width', 'img_height', 'n_channels', 'l2_lambda', 'learning_rate', 'beta1', 'beta2', 'add_scaling']
+        param_names = ['img_width', 'img_height', 'n_channels', 'l2_lambda', 'learning_rate', 'beta1', 'beta2', 'add_scaling',
+                       'decay_learning_rate', 'combined_train_op']
 
         if new_run:
-            self.img_height    = img_height
-            self.img_width     = img_width
-            self.n_channels    = n_channels
-            self.l2_lambda     = l2_lambda
-            self.learning_rate = learning_rate
-            self.beta1         = beta1
-            self.beta2         = beta2
-            self.add_scaling   = add_scaling
+            self.img_height          = img_height
+            self.img_width           = img_width
+            self.n_channels          = n_channels
+            self.l2_lambda           = l2_lambda
+            self.learning_rate       = learning_rate
+            self.beta1               = beta1
+            self.beta2               = beta2
+            self.add_scaling         = add_scaling
+            self.decay_learning_rate = decay_learning_rate
+            self.combined_train_op   = combined_train_op
         else:
             log = pd.read_hdf(self.log_fname, log_key)
             for param in param_names:
@@ -572,7 +577,6 @@ class CNN(BaseNN):
         self.params.update({param: self.__getattribute__(param) for param in param_names})
 
         self._build_graph()
-
 
     def _build_graph(self):
         """
@@ -600,6 +604,7 @@ class CNN(BaseNN):
             self.predict = {}
             self.labels_p = {}
             self.loss_ops = {}
+            self.metrics = {}
 
             if self.n_class_tasks > 0:
                 self.logits = {}
@@ -614,7 +619,9 @@ class CNN(BaseNN):
                         self.predict[name] = tf.nn.softmax(self.logits[name], name='predict')
                         self.loss_ops[name] = tf.losses.sparse_softmax_cross_entropy(self.labels_p[name], self.logits[name], scope='xent')
 
-                        self.accuracy[name] = tf.metrics.accuracy(self.labels_p[name], tf.arg_max(self.predict[name], 1))
+                        _, self.accuracy[name] = tf.metrics.accuracy(self.labels_p[name], tf.arg_max(self.predict[name], 1))
+
+                        self.metrics.update({f'acc_{name}': self.accuracy[name] for name in self.accuracy})
 
                         # self.probs_p[name] = tf.placeholder(tf.float32, shape=(None, self.n_classes[i]), name='probs_p')
                         # self.accuracy[name] = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p[name], self.labels_p[name], k=1), tf.float32))
@@ -629,18 +636,139 @@ class CNN(BaseNN):
                     self.predict[name] = tf.layers.dense(hidden, 1, activation=None)
                     self.loss_ops[name] = tf.losses.mean_squared_error(self.labels_p[name], self.predict[name], scope='mse')
 
-            self.loss_op = tf.add_n(list(self.loss_ops.values()))
+            self.global_step = tf.Variable(0, trainable=False)
+            if self.decay_learning_rate:
+                self.decayed_lr = tf.train.exponential_decay(self.learning_rate, self.global_step,
+                                                             decay_steps=200000 // self.batch_size, decay_rate=0.94)
+                self.optimizer = tf.train.RMSPropOptimizer(self.decayed_lr)  # , epsilon=1)
+            else:
+                self.optimizer = tf.train.AdamOptimizer(self.learning_rate, self.beta1, self.beta2)
+
+            if self.combined_train_op:
+                self.loss_op = tf.add_n(list(self.loss_ops.values()))
+                if self.l2_lambda:
+                    self.loss_op = tf.add(self.loss_op, self.l2_lambda * tf.reduce_sum([tf.nn.l2_loss(var) for var in tf.trainable_variables()]), name='loss')
+
+                self.train_op = self.optimizer.minimize(self.loss_op, global_step=self.global_step, name='train_op')
+            else:
+                self.train_op = {task: self.optimizer.minimize(self.loss_ops[task], global_step=self.global_step, name=f"train_op_{task}")
+                                 for task in self.loss_ops}
+                assert False
+                # TODO: change train to work with this
+
+            self.early_stop_metric_name = 'dev_loss'
+            self.uses_dataset = False
+
+            self.saver = tf.train.Saver()
+            self.global_init = tf.global_variables_initializer()
+            self.local_init = tf.local_variables_initializer()
+
+        self._add_savers_and_writers()
+        self._check_graph()
+
+    # def score(self, inputs, labels):
+    #     probs = self.predict_proba(inputs)
+    #     return self.sess.run([self.accuracy1, self.accuracy5], {self.probs_p: probs, self.labels_p: labels})
+
+
+class RLCNN(BaseNN):
+    def __init__(
+        self,
+        layers: Optional[List[_Layer]]        = None,
+        models_dir:                       str = '',
+        log_key:                          str = 'default',
+        task_names:   Optional[Sequence[str]] = None,
+        config:      Optional[tf.ConfigProto] = None,
+        run_num:                          int = -1,
+        batch_size:                       int = 128,
+        record:                          bool = True,
+        random_state:                     int = 521,
+        data_params: Optional[Dict[str, Any]] = None,
+        # begin class specific parameters
+        n_actions:                        int = 0,
+        img_width:                        int = 128,
+        img_height:                       int = 128,
+        n_channels:                       int = 3,
+        l2_lambda:            Optional[float] = None,
+        learning_rate:                  float = 0.001,
+        beta1:                          float = 0.9,
+        beta2:                          float = 0.999,
+        add_scaling:                     bool = False,
+        decay_learning_rate:             bool = False,
+    ):
+        new_run = run_num == -1
+        super().__init__(layers, models_dir, log_key, 0, 0, task_names, config, run_num,
+                         batch_size, record, random_state, data_params)
+
+        param_names = ['img_width', 'img_height', 'n_channels', 'l2_lambda', 'learning_rate', 'beta1', 'beta2', 'add_scaling',
+                       'decay_learning_rate', 'n_actions']
+
+        if new_run:
+            self.n_actions           = n_actions
+            self.img_height          = img_height
+            self.img_width           = img_width
+            self.n_channels          = n_channels
+            self.l2_lambda           = l2_lambda
+            self.learning_rate       = learning_rate
+            self.beta1               = beta1
+            self.beta2               = beta2
+            self.add_scaling         = add_scaling
+            self.decay_learning_rate = decay_learning_rate
+        else:
+            log = pd.read_hdf(log_fname, log_key)
+            for param in param_names:
+                p = log.loc[run_num, param]
+                self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
+
+        self.params.update({param: self.__getattribute__(param) for param in param_names})
+
+        self._build_graph()
+
+
+    def _build_graph(self):
+        """
+        If self.log_dir contains a previously trained model, then the graph from that run is loaded for further
+        training/inference. Otherwise, a new graph is built.
+        Also starts a session with self.graph.
+        If self.log_dir != '' then a Saver and summary writers are also created.
+        :returns: None
+        """
+
+        self.graph = tf.Graph()
+        with self.graph.as_default():
+            self.inputs_p = tf.placeholder(tf.float32, shape=(None, self.img_height, self.img_width, self.n_channels), name='inputs_p')
+            self.action_idx = tf.placeholder(tf.int32, shape=(None, 2), name='action_idx')
+            self.labels_p = tf.placeholder(tf.float32, shape=None, name='labels_p')
+
+            self.is_training = tf.placeholder_with_default(False, [])
+
+            if self.add_scaling:
+                mean, std = tf.nn.moments(self.inputs_p, axes=[1, 2], keep_dims=True)
+                hidden = (self.inputs_p - mean) / tf.sqrt(std)
+            else:
+                hidden = self.inputs_p
+
+            for layer in self.layers:
+                hidden = layer.apply(hidden, is_training=self.is_training)
+
+            self.predict = tf.layers.dense(hidden, self.n_actions, activation=None)
+            self.loss_op = tf.losses.mean_squared_error(tf.gather_nd(self.predict, self.action_idx),
+                                                        self.labels_p, scope='mse')
+            self.metrics = {}
+
+            self.global_step = tf.Variable(0, trainable=False)
+            if self.decay_learning_rate:
+                self.decayed_lr = tf.train.exponential_decay(self.learning_rate, self.global_step,
+                                                             decay_steps=200000 // self.batch_size, decay_rate=0.94)
+                self.optimizer = tf.train.RMSPropOptimizer(self.decayed_lr)  # , epsilon=1)
+            else:
+                self.optimizer = tf.train.AdamOptimizer(self.learning_rate, self.beta1, self.beta2)
+
             if self.l2_lambda:
                 self.loss_op = tf.add(self.loss_op, self.l2_lambda * tf.reduce_sum([tf.nn.l2_loss(var) for var in tf.trainable_variables()]), name='loss')
 
-            # self.train_op = tf.train.AdamOptimizer(self.learning_rate, self.beta1, self.beta2).minimize(self.loss_op, name='train_op')
-            self.global_step = tf.Variable(0, trainable=False)
-            self.decayed_lr = tf.train.exponential_decay(self.learning_rate, self.global_step,
-                                                         decay_steps=200000 // self.batch_size, decay_rate=0.94)
-            self.optimizer = tf.train.RMSPropOptimizer(self.decayed_lr)#, epsilon=1)
             self.train_op = self.optimizer.minimize(self.loss_op, global_step=self.global_step, name='train_op')
 
-            self.metrics = {f'acc_{name}': self.accuracy[name] for name in self.accuracy}
             self.early_stop_metric_name = 'dev_loss'
             self.uses_dataset = False
 
@@ -650,9 +778,14 @@ class CNN(BaseNN):
         self._add_savers_and_writers()
         self._check_graph()
 
-    def score(self, inputs, labels):
-        probs = self.predict_proba(inputs)
-        return self.sess.run([self.accuracy1, self.accuracy5], {self.probs_p: probs, self.labels_p: labels})
+    def train(self, *args):
+        raise NotImplemented
+
+    def predict_proba(self, *args):
+        raise NotImplemented
+
+    def score(self, *args):
+        raise NotImplemented
 
 
 class RNN(BaseNN):
@@ -722,13 +855,6 @@ class RNN(BaseNN):
         else:
             n_batches = int(np.ceil(len(data) / self.batch_size))
         return n_batches
-
-    @staticmethod
-    def _metric_improved(old_metric: _numeric, new_metric: _numeric, significant: bool=False, threshold: float=.01) -> bool:
-        if significant:
-            return new_metric < (1 - threshold) * old_metric
-        else:
-            return new_metric < old_metric
 
     def _build_graph(self) -> None:
         """
