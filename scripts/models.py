@@ -168,7 +168,7 @@ class BaseNN(object):
     def _metric_improved(old_metric: _numeric, new_metric: _numeric, significant: bool=False, threshold: float=.01) -> bool:
         """
         By default, improving is *decreasing* (e.g. for a loss function).
-        Override this if you need an increasein the metric to be an improvement (to use '>' and '+' instead of '<' and '-'
+        Override this if you need an increase in the metric to be an improvement (to use '>' and '+' instead of '<' and '-'
         :param old_metric:
         :param new_metric:
         :param significant:
@@ -295,17 +295,17 @@ class BaseNN(object):
         :param dev_labels:
         :param n_epochs:
         :param max_patience:
-        :param verbose: 2 for tnrange, 1 for trange, 0 for range
+        :param verbose: 3 for tnrange, 2 for trange, 1 for range w/ print, 0 for range
         :returns: {name: value} of the various metrics at the best epoch; includes train_time and whether training was
                   completed
         """
 
         start_time = time.time()
 
-        if verbose == 2:
+        if verbose == 3:
             epoch_range = lambda *args: tnrange(*args, unit='epoch')
             batch_range = lambda *args: tnrange(*args, unit='batch', leave=False)
-        elif verbose == 1:
+        elif verbose == 2:
             epoch_range = lambda *args: trange(*args, unit='epoch')
             batch_range = lambda *args: trange(*args, unit='batch', leave=False)
         else:
@@ -315,7 +315,7 @@ class BaseNN(object):
         train_inputs, train_labels, dev_inputs, dev_labels = [x if type(x) is dict else {'default': x}
                                                               for x in [train_inputs, train_labels, dev_inputs, dev_labels]]
 
-        if self._metric_improved(0, 1): # higher is better; start low
+        if self._metric_improved(0, 1):  # higher is better; start low
             best_early_stop_metric = -np.inf
         else:
             best_early_stop_metric = np.inf
@@ -349,6 +349,9 @@ class BaseNN(object):
             dev_metrics.update({'dev_loss': dev_loss})
             early_stop_metric = dev_metrics[self.early_stop_metric_name]
 
+            if verbose == 1:
+                print(f"Train loss: {train_loss:.3f}; Dev loss: {dev_loss:.3f}. Metrics: {dev_metrics}")
+
             if self.record:
                 self._add_summaries(epoch, {'loss': train_loss}, dev_metrics)
 
@@ -369,12 +372,12 @@ class BaseNN(object):
                     break
 
             runtime = (time.time() - start_time) / 60
-            if verbose:
+            if verbose > 1:
                 epochs.set_description(
                     f"Epoch {epoch + 1}. Train Loss: {train_loss:.3f}. Dev loss: {dev_loss:.3f}. Runtime {runtime:.2f}.")
 
+        best_metrics['train_complete'] = True
         if self.record:
-            best_metrics['train_complete'] = True
             self._log(best_metrics)
             self.saver.restore(self.sess, os.path.join(self.log_dir, 'model.ckpt'))  # reload best epoch
 
@@ -619,7 +622,7 @@ class CNN(BaseNN):
                         self.predict[name] = tf.nn.softmax(self.logits[name], name='predict')
                         self.loss_ops[name] = tf.losses.sparse_softmax_cross_entropy(self.labels_p[name], self.logits[name], scope='xent')
 
-                        _, self.accuracy[name] = tf.metrics.accuracy(self.labels_p[name], tf.arg_max(self.predict[name], 1))
+                        _, self.accuracy[name] = tf.metrics.accuracy(self.labels_p[name], tf.argmax(self.predict[name], 1))
 
                         self.metrics.update({f'acc_{name}': self.accuracy[name] for name in self.accuracy})
 
@@ -644,19 +647,24 @@ class CNN(BaseNN):
             else:
                 self.optimizer = tf.train.AdamOptimizer(self.learning_rate, self.beta1, self.beta2)
 
+            update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+
             if self.combined_train_op:
                 self.loss_op = tf.add_n(list(self.loss_ops.values()))
                 if self.l2_lambda:
                     self.loss_op = tf.add(self.loss_op, self.l2_lambda * tf.reduce_sum([tf.nn.l2_loss(var) for var in tf.trainable_variables()]), name='loss')
 
-                self.train_op = self.optimizer.minimize(self.loss_op, global_step=self.global_step, name='train_op')
+                with tf.control_dependencies(update_ops):
+                    self.train_op = self.optimizer.minimize(self.loss_op, global_step=self.global_step, name='train_op')
             else:
-                self.train_op = {task: self.optimizer.minimize(self.loss_ops[task], global_step=self.global_step, name=f"train_op_{task}")
-                                 for task in self.loss_ops}
+                self.train_op = {}
+                for task in self.loss_ops:
+                    with tf.control_dependencies(update_ops):  # these will be updated regardless of task; shouldn't be task specific?
+                        self.train_op[task]: self.optimizer.minimize(self.loss_ops[task], global_step=self.global_step, name=f"train_op_{task}")
                 assert False
                 # TODO: change train to work with this
 
-            self.early_stop_metric_name = 'dev_loss'
+            self.early_stop_metric_name = 'acc_default'
             self.uses_dataset = False
 
             self.saver = tf.train.Saver()
@@ -665,6 +673,23 @@ class CNN(BaseNN):
 
         self._add_savers_and_writers()
         self._check_graph()
+
+    @staticmethod
+    def _metric_improved(old_metric: _numeric, new_metric: _numeric, significant: bool = False,
+                         threshold: float = .01) -> bool:
+        """
+        CNN uses accuracy, so an increase is an improvement
+        :param old_metric:
+        :param new_metric:
+        :param significant:
+        :param threshold:
+        :return:
+        """
+
+        if significant:
+            return new_metric > (1 + threshold) * old_metric
+        else:
+            return new_metric > old_metric
 
     # def score(self, inputs, labels):
     #     probs = self.predict_proba(inputs)

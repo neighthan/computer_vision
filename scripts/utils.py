@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 from PIL import PngImagePlugin
+from typing import Optional
 
 
 def output_file(preds, split='test', k=5, pad_to=8):
@@ -72,7 +73,7 @@ def get_next_run_num(run_num_file, verbose=True):
     return run_num
 
 
-def tf_init(device: str='', n_gpus: int=4, tf_logging_verbosity: str='1') -> tf.ConfigProto:
+def tf_init(device: Optional[int]=None, n_gpus: int=4, tf_logging_verbosity: str='1') -> tf.ConfigProto:
     """
     Runs common operations at start of TensorFlow:
       - sets logging verbosity
@@ -84,8 +85,8 @@ def tf_init(device: str='', n_gpus: int=4, tf_logging_verbosity: str='1') -> tf.
     :returns: the aforementioned TensorFlow config
     """
 
-    if device:
-        os.environ['CUDA_VISIBLE_DEVICES'] = device
+    if device is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(device)
     else:
         os.environ['CUDA_VISIBLE_DEVICES'] = get_best_gpu(n_gpus=n_gpus)
 

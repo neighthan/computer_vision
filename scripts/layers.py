@@ -74,7 +74,7 @@ class ConvLayer(_Layer):
 
 
 class _PoolLayer(_Layer):
-    def __init__(self, size:_OneOrMore(int), strides: _OneOrMore(int)=1, padding: str='same', batch_norm: bool=False):
+    def __init__(self, size: _OneOrMore(int), strides: _OneOrMore(int)=1, padding: str='same', batch_norm: bool=False):
         self.params = dict(
             pool_size=size,
             strides=strides,
@@ -239,7 +239,7 @@ class DropoutLayer(_Layer):
     def layer(self):
         return _layers['dropout']
 
-    def apply(self, inputs: tf.Tensor, is_training:tf.Tensor) -> tf.Tensor:
+    def apply(self, inputs: tf.Tensor, is_training: tf.Tensor) -> tf.Tensor:
         params = self.params.copy()
         params['training'] = is_training
 
