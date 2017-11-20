@@ -199,6 +199,30 @@ class MergeLayer(_Layer):
         return f"Merge[axis={self.params['axis']}]"
 
 
+class ResidualLayer(_Layer):
+    """
+    Adds two layers element-wise. Does not support projecting to a common shape
+    """
+
+    def __init__(self):
+        pass
+
+    def apply(self, inputs: Sequence[tf.Tensor], is_training: Optional[tf.Tensor]=None) -> tf.Tensor:
+        """
+        :param inputs: two tensors
+        :param is_training: unused
+        :returns: elementwise addition of the two tensors in `inputs`
+        """
+
+        return inputs[0] + inputs[1]
+
+    def __eq__(self, other):
+        return type(other) is ResidualLayer
+
+    def __repr__(self):
+        return "Residual Layer"
+
+
 class FlattenLayer(_Layer):
     def __init__(self):
         self.params = {}
