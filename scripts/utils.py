@@ -17,6 +17,12 @@ def output_file(preds, split='test', k=5, pad_to=8):
     preds.to_csv('preds.txt', sep=' ', header=None)
 
 
+def acc_at_k(k: int, preds: pd.DataFrame, labels: np.ndarray) -> float:
+    top_k_preds = np.stack(preds.apply(lambda row: row.sort_values(ascending=False)[:k].index.tolist(), axis=1))
+    acc_at_k = np.mean([labels[i] in top_k_preds[i] for i in range(len(labels))])
+    return acc_at_k
+
+
 def flatten(list_):
     flat = []
     for elem in list_:
@@ -84,6 +90,8 @@ def tf_init(device: Optional[int]=None, n_gpus: int=4, tf_logging_verbosity: str
     :param tf_logging_verbosity: 0 for everything; 1 to remove info; 2 to remove warnings; 3 to remove errors
     :returns: the aforementioned TensorFlow config
     """
+
+    os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 
     if device is not None:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(device)

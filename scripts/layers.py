@@ -1,5 +1,5 @@
 import tensorflow as tf
-from utils import flatten
+from computer_vision.scripts.utils import flatten
 from typing import Union, Sequence, Optional
 
 _OneOrMore = lambda type_: Union[type_, Sequence[type_]]

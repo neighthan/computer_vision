@@ -6,9 +6,9 @@ from tqdm import tnrange, trange
 import time
 import os
 import sys
-from utils import tf_init, get_next_run_num, get_abs_path
+from computer_vision.scripts.utils import tf_init, get_next_run_num, get_abs_path, acc_at_k
 from typing import List, Optional, Dict, Any, Union, Sequence
-from layers import ConvLayer, MaxPoolLayer, AvgPoolLayer, BranchedLayer, MergeLayer, LayerModule, FlattenLayer,\
+from computer_vision.scripts.layers import ConvLayer, MaxPoolLayer, AvgPoolLayer, BranchedLayer, MergeLayer, LayerModule, FlattenLayer,\
     DenseLayer, DropoutLayer, GlobalAvgPoolLayer, GlobalMaxPoolLayer, LSTMLayer, _Layer
 import warnings
 
@@ -691,9 +691,9 @@ class CNN(BaseNN):
         else:
             return new_metric > old_metric
 
-    # def score(self, inputs, labels):
-    #     probs = self.predict_proba(inputs)
-    #     return self.sess.run([self.accuracy1, self.accuracy5], {self.probs_p: probs, self.labels_p: labels})
+    def score(self, inputs, labels):
+        probs = self.predict_proba(inputs)
+        return acc_at_k(1, inputs, labels), acc_at_k(5, inputs, labels)
 
 
 class RLCNN(BaseNN):
