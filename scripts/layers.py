@@ -34,6 +34,9 @@ class _Layer(object):
     or else the layer must override apply (see, e.g., BranchedLayer).
     """
 
+    def __init__(self):
+        self.params = {}
+
     def apply(self, inputs: tf.Tensor, is_training: tf.Tensor) -> tf.Tensor:
         """
 
@@ -46,10 +49,17 @@ class _Layer(object):
         if 'kernel_initializer' in params.keys():
             params['kernel_initializer'] = _initializers[params['kernel_initializer']]()
 
-        output = self.layer(inputs, **params)
-
         if self.batch_norm:
-            output = tf.layers.batch_normalization(output, training=is_training)
+            if 'activation' in params:
+                activation = params.pop('activation')
+                output = self.layer(inputs, activation=None, **params)
+                output = tf.layers.batch_normalization(output, training=is_training)
+                output = activation(output)
+            else:
+                output = self.layer(inputs, **params)
+                output = tf.layers.batch_normalization(output, training=is_training)
+        else:
+            output = self.layer(inputs, **params)
         return output
 
     def __repr__(self):
@@ -59,14 +69,15 @@ class _Layer(object):
 class ConvLayer(_Layer):
     def __init__(self, n_filters:int, kernel_size:_OneOrMore(int), strides: int=1,
                  activation: str='relu', padding: str='same', batch_norm: bool=True):
-        self.params = dict(
+        super().__init__()
+        self.params.update(dict(
             filters=n_filters,
             kernel_size=kernel_size,
             strides=strides,
             activation=_activations[activation],
             padding=padding,
             kernel_initializer='variance_scaling_initializer'
-        )
+        ))
         self.batch_norm = batch_norm
 
     @property
@@ -76,11 +87,12 @@ class ConvLayer(_Layer):
 
 class _PoolLayer(_Layer):
     def __init__(self, size: _OneOrMore(int), strides: _OneOrMore(int)=1, padding: str='same', batch_norm: bool=False):
-        self.params = dict(
+        super().__init__()
+        self.params.update(dict(
             pool_size=size,
             strides=strides,
             padding=padding
-        )
+        ))
         self.batch_norm = batch_norm
 
 
@@ -98,10 +110,11 @@ class AvgPoolLayer(_PoolLayer):
 
 class _GlobalPoolLayer(_Layer):
     def __init__(self, batch_norm: bool=False):
-        self.params = dict(
+        super().__init__()
+        self.params.update(dict(
             strides=1,
             padding='valid'
-        )
+        ))
         self.batch_norm = batch_norm
 
     def apply(self, inputs: tf.Tensor, is_training: tf.Tensor):
@@ -138,6 +151,8 @@ class BranchedLayer(_Layer):
         """
         :param List[_Layer] layers:
         """
+
+        super().__init__()
         self.layers = layers
 
     def apply(self, inputs: _OneOrMore(tf.Tensor), is_training: tf.Tensor) -> Sequence[tf.Tensor]:
@@ -176,7 +191,8 @@ class MergeLayer(_Layer):
     """
 
     def __init__(self, axis:int):
-        self.params = dict(axis=axis)
+        super().__init__()
+        self.params.update(dict(axis=axis))
 
     @property
     def layer(self):
@@ -205,9 +221,6 @@ class ResidualLayer(_Layer):
     Adds two layers element-wise. Does not support projecting to a common shape
     """
 
-    def __init__(self):
-        pass
-
     def apply(self, inputs: Sequence[tf.Tensor], is_training: Optional[tf.Tensor]=None) -> tf.Tensor:
         """
         :param inputs: two tensors
@@ -226,7 +239,7 @@ class ResidualLayer(_Layer):
 
 class FlattenLayer(_Layer):
     def __init__(self):
-        self.params = {}
+        super().__init__()
         self.batch_norm = False
 
     @property
@@ -235,12 +248,13 @@ class FlattenLayer(_Layer):
 
 
 class DenseLayer(_Layer):
-    def __init__(self, n_units:int, activation: str='relu', batch_norm: bool=True):
-        self.params = dict(
+    def __init__(self, n_units: int, activation: str='relu', batch_norm: bool=True):
+        super().__init__()
+        self.params.update(dict(
             units=n_units,
             activation=_activations[activation],
             kernel_initializer='variance_scaling_initializer'
-        )
+        ))
         self.batch_norm = batch_norm
 
     @property
@@ -257,8 +271,9 @@ class DenseLayer(_Layer):
 
 
 class DropoutLayer(_Layer):
-    def __init__(self, rate:float):
-        self.params = dict(rate=rate)
+    def __init__(self, rate: float):
+        super().__init__()
+        self.params.update(dict(rate=rate))
 
     @property
     def layer(self):
@@ -282,11 +297,12 @@ class LSTMLayer(_Layer):
         :param ret: what to return from the LSTM layer: "state", "output", or "both" (as a two tensor tuple)
         """
 
+        super().__init__()
         n_units = n_units if type(n_units) in (list, tuple) else [n_units]
-        self.params = dict(
+        self.params.update(dict(
             activation=_activations[activation],
             initializer=tf.contrib.layers.variance_scaling_initializer
-        )
+        ))
         self.n_units = n_units
         self.ret = ret
         self.last_only = last_only
@@ -358,6 +374,7 @@ class LayerModule(_Layer):
     """
 
     def __init__(self, layers: Sequence[_Layer]):
+        super().__init__()
         self.layers = layers
 
     def apply(self, inputs: _OneOrMore(tf.Tensor), is_training: tf.Tensor) -> tf.Tensor:
