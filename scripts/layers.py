@@ -6,7 +6,8 @@ _OneOrMore = lambda type_: Union[type_, Sequence[type_]]
 
 _activations = {
     'relu': tf.nn.relu,
-    'tanh': tf.nn.tanh
+    'tanh': tf.nn.tanh,
+    '': None
 }
 
 _layers = {
