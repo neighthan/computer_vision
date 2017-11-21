@@ -1,11 +1,15 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import tflearn
 from tflearn import activations
 from tqdm import tnrange, trange
 import time
 import os
 import sys
+from bson import BSON
+from bson.errors import InvalidDocument
+import pickle
 from computer_vision.scripts.utils import tf_init, get_next_run_num, get_abs_path, acc_at_k
 from typing import List, Optional, Dict, Any, Union, Sequence
 from computer_vision.scripts.layers import ConvLayer, MaxPoolLayer, AvgPoolLayer, BranchedLayer, MergeLayer, LayerModule, FlattenLayer,\
@@ -46,18 +50,22 @@ class BaseNN(object):
         n_classes:            _OneOrMore(int) = (),
         task_names:   Optional[Sequence[str]] = None,
         config:      Optional[tf.ConfigProto] = None,
-        run_num:                          int = -1,
+        model_name:                        str = '',
         batch_size:                       int = 128,
         record:                          bool = True,
         random_state:                     int = 521,
-        data_params: Optional[Dict[str, Any]] = None
+        data_params: Optional[Dict[str, Any]] = None,
+        log_to_hdf5:                     bool = True,
+        saved_params:          Optional[dict] = None
     ):
 
         # don't include run_num or config
-        param_names = ['layers', 'n_classes', 'n_regress_tasks', 'task_names', 'random_state', 'batch_size', 'data_params']
+        param_names = ['layers', 'n_classes', 'n_regress_tasks', 'task_names', 'model_name',
+                       'random_state', 'batch_size', 'data_params']
 
         if record:
-            assert models_dir, "models_dir must be specifed to record a model."
+            assert models_dir, "models_dir must be specified to record a model."
+            assert model_name, "model_name must be specified to record a model."
 
         self.log_fname = f'{models_dir}/log.h5'
 
@@ -71,48 +79,48 @@ class BaseNN(object):
             n_classes = (n_classes,)
 
         if len(n_classes) == 0 and n_regress_tasks == 0:
-            n_regress_tasks = 1 # assume doing (a single) regression if n_classes isn't given
+            n_regress_tasks = 1  # assume doing (a single) regression if n_classes isn't given
 
         if task_names is None:
             if n_regress_tasks + len(n_classes) > 1:
                 raise AttributeError('task_names must be specified for a multi-task model.')
-            else: # to make single task easier to use; just set a name
+            else:  # to make single task easier to use; just set a name
                 task_names = ('default',)
 
-        if run_num == -1:
+        self.log_dir = f'{models_dir}/{model_name}/'
+        if os.path.isdir(self.log_dir):  # model exists; reload
+            if log_to_hdf5:
+                log = pd.read_hdf(self.log_fname, log_key)
+                for param in param_names:
+                    p = log.loc[model_name, param]
+                    self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
+            else:
+                for param in param_names:
+                    p = saved_params[param]
+                    self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
+        else:
             assert type(layers) is not None
             assert n_regress_tasks > 0 or len(n_classes) > 0
-            self.run_num         = get_next_run_num(f'{models_dir}/run_num.pkl') if record else 0
-            self.layers          = layers
+            self.model_name = model_name
+            self.layers = layers
             self.n_regress_tasks = n_regress_tasks
-            self.n_classes       = n_classes
-            self.task_names      = task_names
-            self.random_state    = random_state
-            self.batch_size      = batch_size
-            self.record          = record
-            self.data_params     = data_params
-        else:
-            assert models_dir, "models_dir must be specified to reload a model."
-            self.run_num = run_num
-            log = pd.read_hdf(self.log_fname, log_key)
-            for param in param_names:
-                p = log.loc[run_num, param]
-                self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
+            self.n_classes = n_classes
+            self.task_names = task_names
+            self.random_state = random_state
+            self.batch_size = batch_size
+            self.record = record
+            self.data_params = data_params
+
+            if record:
+                os.makedirs(self.log_dir)
 
         self.config        = config
         self.models_dir    = models_dir
         self.log_key       = log_key
         self.n_class_tasks = len(self.n_classes)
         self.params        = {param: self.__getattribute__(param) for param in param_names}
-
-        if record:
-            self.log_dir = f'{models_dir}/{self.run_num}/'
-            try:
-                os.makedirs(self.log_dir)
-            except OSError: # already exists if loading saved model
-                pass
-        else:
-            self.log_dir = ''
+        self.record        = record
+        self.log_to_hdf5   = log_to_hdf5
 
         tf.set_random_seed(self.random_state)
         np.random.seed(self.random_state)
@@ -138,7 +146,7 @@ class BaseNN(object):
             self.global_init = tf.global_variables_initializer()
             self.is_training = tf.placeholder_with_default(False, [])
 
-            self.metrics = {} # {'name': tensor}; must be able to calculate on a stream, at least for now
+            self.metrics = {}  # {'name': tensor}; must be able to calculate on a stream, at least for now
             self.early_stop_metric_name = 'dev_loss' # or 'auc' or...; must define a metric that matches this
             self.uses_dataset = False
 
@@ -146,7 +154,7 @@ class BaseNN(object):
         self._check_graph()
     
     def _add_savers_and_writers(self):
-        if self.log_dir != '':
+        if self.record:
             with self.graph.as_default():
                 self.train_writer = tf.summary.FileWriter(os.path.join(self.log_dir, 'train'), self.graph, flush_secs=30)
                 self.dev_writer = tf.summary.FileWriter(os.path.join(self.log_dir, 'dev'), self.graph, flush_secs=30)
@@ -221,11 +229,14 @@ class BaseNN(object):
 
         if dataset:
             self.sess.run(self.data_init_op, self._get_feed_dict(inputs, labels))
-
-        if idx is None:
-            idx = list(range(len(next(iter(inputs.values())))))
-        if range_ is None:
-            range_ = range(int(np.ceil(len(idx) / self.batch_size)))
+            # if range isn't provided, run until you hit a StopIteration error; this isn't really supported now, though,
+            # so it isn't caught
+            range_ = range_ if range_ is not None else range(int(1e50))
+        else:
+            if idx is None:
+                idx = list(range(len(next(iter(inputs.values())))))
+            if range_ is None:
+                range_ = range(int(np.ceil(len(idx) / self.batch_size)))
 
         try:
             self.sess.run(self.local_init)
@@ -267,18 +278,38 @@ class BaseNN(object):
                 value=[tf.Summary.Value(tag=val_name, simple_value=dev_vals[val_name])]), epoch)
 
     def _log(self, extras):
-        params_df = (pd.DataFrame([[self.params[key] for key in self.params.keys()]], columns=self.params.keys(),
-                                  index=[self.run_num])
-                     .assign(**extras))
+        if self.log_to_hdf5:
+            params_df = (pd.DataFrame([[self.params[key] for key in self.params.keys()]], columns=self.params.keys(),
+                                      index=[self.model_name])
+                         .assign(**extras))
 
-        try:
-            log = pd.read_hdf(self.log_fname, self.log_key)
+            try:
+                log = pd.read_hdf(self.log_fname, self.log_key)
 
-            if self.run_num in log.index:
-                log = log.drop(self.run_num)
-            pd.concat([log, params_df]).to_hdf(self.log_fname, self.log_key)
-        except (IOError, KeyError):  # this file or key doesn't exist yet
-            params_df.to_hdf(self.log_fname, self.log_key)
+                if self.model_name in log.index:
+                    log = log.drop(self.model_name)
+                pd.concat([log, params_df]).to_hdf(self.log_fname, self.log_key)
+            except (IOError, FileNotFoundError, KeyError):  # this file or key doesn't exist yet
+                params_df.to_hdf(self.log_fname, self.log_key)
+        else:
+            log_data = self.params.copy()
+            log_data['_id'] = self.model_name
+            log_data.update(extras)
+
+            log_fname = os.path.expanduser(f"~/.logs/{log_data['_id']}")
+            for key, val in log_data.items():
+                if type(val) in [np.float64, np.float32]:
+                    log_data[key] = float(val)
+                elif type(val) in [np.int64, np.int32]:
+                    log_data[key] = int(val)
+                else:
+                    try:
+                        BSON.encode({'test': val})
+                    except (TypeError, InvalidDocument):  # can't convert to BSON; dump to bytes
+                        log_data[key] = pickle.dumps(val)
+            log_string = BSON.encode(log_data)
+            with open(log_fname, 'wb') as f:
+                f.write(log_string)
 
     def _save(self):
         self.saver.save(self.sess, os.path.join(self.log_dir, 'model.ckpt'))
@@ -349,9 +380,6 @@ class BaseNN(object):
             dev_metrics.update({'dev_loss': dev_loss})
             early_stop_metric = dev_metrics[self.early_stop_metric_name]
 
-            if verbose == 1:
-                print(f"Train loss: {train_loss:.3f}; Dev loss: {dev_loss:.3f}. Metrics: {dev_metrics}")
-
             if self.record:
                 self._add_summaries(epoch, {'loss': train_loss}, dev_metrics)
 
@@ -372,7 +400,9 @@ class BaseNN(object):
                     break
 
             runtime = (time.time() - start_time) / 60
-            if verbose > 1:
+            if verbose == 1:
+                print(f"Train loss: {train_loss:.3f}; Dev loss: {dev_loss:.3f}. Metrics: {dev_metrics}. Time: {runtime}")
+            elif verbose > 1:
                 epochs.set_description(
                     f"Epoch {epoch + 1}. Train Loss: {train_loss:.3f}. Dev loss: {dev_loss:.3f}. Runtime {runtime:.2f}.")
 
@@ -536,11 +566,13 @@ class CNN(BaseNN):
         n_classes:            _OneOrMore(int) = (),
         task_names:   Optional[Sequence[str]] = None,
         config:      Optional[tf.ConfigProto] = None,
-        run_num:                          int = -1,
+        model_name:                       str = '',
         batch_size:                       int = 64,
         record:                          bool = True,
         random_state:                     int = 521,
         data_params: Optional[Dict[str, Any]] = None,
+        log_to_hdf5:                     bool = True,
+        saved_params:          Optional[dict] = None,
         # begin class specific parameters
         img_width:                        int = 128,
         img_height:                       int = 128,
@@ -553,29 +585,34 @@ class CNN(BaseNN):
         decay_learning_rate:             bool = False,
         combined_train_op:               bool = True
     ):
-        new_run = run_num == -1
-        super().__init__(layers, models_dir, log_key, n_regress_tasks, n_classes, task_names, config, run_num,
-                         batch_size, record, random_state, data_params)
+        load_model = os.path.isdir(f'{models_dir}/{model_name}/')
+        super().__init__(layers, models_dir, log_key, n_regress_tasks, n_classes, task_names, config, model_name,
+                         batch_size, record, random_state, data_params, log_to_hdf5, saved_params)
 
         param_names = ['img_width', 'img_height', 'n_channels', 'l2_lambda', 'learning_rate', 'beta1', 'beta2', 'add_scaling',
                        'decay_learning_rate', 'combined_train_op']
 
-        if new_run:
-            self.img_height          = img_height
-            self.img_width           = img_width
-            self.n_channels          = n_channels
-            self.l2_lambda           = l2_lambda
-            self.learning_rate       = learning_rate
-            self.beta1               = beta1
-            self.beta2               = beta2
-            self.add_scaling         = add_scaling
-            self.decay_learning_rate = decay_learning_rate
-            self.combined_train_op   = combined_train_op
+        if load_model:
+            if log_to_hdf5:
+                log = pd.read_hdf(self.log_fname, log_key)
+                for param in param_names:
+                    p = log.loc[model_name, param]
+                    self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
+            else:
+                for param in param_names:
+                    p = saved_params[param]
+                    self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
         else:
-            log = pd.read_hdf(self.log_fname, log_key)
-            for param in param_names:
-                p = log.loc[run_num, param]
-                self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
+            self.img_height = img_height
+            self.img_width = img_width
+            self.n_channels = n_channels
+            self.l2_lambda = l2_lambda
+            self.learning_rate = learning_rate
+            self.beta1 = beta1
+            self.beta2 = beta2
+            self.add_scaling = add_scaling
+            self.decay_learning_rate = decay_learning_rate
+            self.combined_train_op = combined_train_op
 
         self.params.update({param: self.__getattribute__(param) for param in param_names})
 
@@ -625,12 +662,6 @@ class CNN(BaseNN):
                         _, self.accuracy[name] = tf.metrics.accuracy(self.labels_p[name], tf.argmax(self.predict[name], 1))
 
                         self.metrics.update({f'acc_{name}': self.accuracy[name] for name in self.accuracy})
-
-                        # self.probs_p[name] = tf.placeholder(tf.float32, shape=(None, self.n_classes[i]), name='probs_p')
-                        # self.accuracy[name] = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p[name], self.labels_p[name], k=1), tf.float32))
-                        # TODO: make it so we can add a desired tensor afterwards? acc@5 shouldn't always be here.
-                        # maybe just do with model.graph.as_default(): model.acc5 = ... ??
-                        # self.accuracy5 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(self.probs_p, self.labels_p, k=5), tf.float32))
 
             for i in range(self.n_class_tasks, self.n_class_tasks + self.n_regress_tasks):
                 name = self.task_names[i]
@@ -693,7 +724,345 @@ class CNN(BaseNN):
 
     def score(self, inputs, labels):
         probs = self.predict_proba(inputs)
-        return acc_at_k(1, inputs, labels), acc_at_k(5, inputs, labels)
+        return acc_at_k(1, probs, labels), acc_at_k(5, probs, labels)
+
+
+class CNN2(BaseNN):
+    """
+
+    """
+    def __init__(
+        self,
+        layers: Optional[List[_Layer]]        = None,
+        models_dir:                       str = '',
+        log_key:                          str = 'default',
+        n_regress_tasks:                  int = 0,
+        n_classes:            _OneOrMore(int) = (),
+        task_names:   Optional[Sequence[str]] = None,
+        config:      Optional[tf.ConfigProto] = None,
+        model_name:                       str = '',
+        batch_size:                       int = 64,
+        record:                          bool = True,
+        random_state:                     int = 521,
+        data_params: Optional[Dict[str, Any]] = None,
+        log_to_hdf5: bool = True,
+        saved_params: Optional[dict] = None,
+        # begin class specific parameters
+        img_width:                        int = 128,
+        img_height:                       int = 128,
+        n_channels:                       int = 3,
+        l2_lambda:            Optional[float] = None,
+        learning_rate:                  float = 0.001,
+        beta1:                          float = 0.9,
+        beta2:                          float = 0.999,
+        add_scaling:                     bool = False,
+        decay_learning_rate:             bool = False,
+        combined_train_op:               bool = True,
+        augment:                         int  = 0
+    ):
+        load_model = os.path.isdir(f'{models_dir}/{model_name}/')
+        super().__init__(layers, models_dir, log_key, n_regress_tasks, n_classes, task_names, config, model_name,
+                         batch_size, record, random_state, data_params, log_to_hdf5, saved_params)
+
+        param_names = ['img_width', 'img_height', 'n_channels', 'l2_lambda', 'learning_rate', 'beta1', 'beta2', 'add_scaling',
+                       'decay_learning_rate', 'combined_train_op', 'augment']
+
+        if load_model:
+            if log_to_hdf5:
+                log = pd.read_hdf(self.log_fname, log_key)
+                for param in param_names:
+                    p = log.loc[model_name, param]
+                    self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
+            else:
+                for param in param_names:
+                    p = saved_params[param]
+                    self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
+        else:
+            self.img_height = img_height
+            self.img_width = img_width
+            self.n_channels = n_channels
+            self.l2_lambda = l2_lambda
+            self.learning_rate = learning_rate
+            self.beta1 = beta1
+            self.beta2 = beta2
+            self.add_scaling = add_scaling
+            self.decay_learning_rate = decay_learning_rate
+            self.combined_train_op = combined_train_op
+            self.augment = augment
+
+        self.params.update({param: self.__getattribute__(param) for param in param_names})
+
+        self._build_graph()
+
+    def _build_graph(self):
+        """
+        If self.log_dir contains a previously trained model, then the graph from that run is loaded for further
+        training/inference. Otherwise, a new graph is built.
+        Also starts a session with self.graph.
+        If self.log_dir != '' then a Saver and summary writers are also created.
+        :returns: None
+        """
+
+        dtype = tf.float32
+
+        self.graph = tf.Graph()
+        with self.graph.as_default():
+            self.inputs_p = {'default': tf.placeholder(tf.string, shape=[None], name='filenames')}
+            self.dataset = (tf.data.TFRecordDataset(self.inputs_p['default'])
+                            .map(self._parse_example)
+                            .repeat()
+                            .shuffle(buffer_size=5000)
+                            .batch(self.batch_size)
+                            )
+            self.iterator = self.dataset.make_initializable_iterator()
+            imgs, labels = self.iterator.get_next()
+            self.imgs0 = imgs
+            imgs = tf.image.convert_image_dtype(tf.reshape(imgs, (-1, self.img_height, self.img_width, self.n_channels)), dtype)
+            self.imgs1 = imgs
+            self.labels_p = {'default': labels}
+            self.data_init_op = self.iterator.initializer
+
+            self.is_training = tf.placeholder_with_default(False, [])
+
+            if self.augment == 1:
+                imgs = tf.py_func(self._augment_imgs, [imgs], tf.float32, stateful=False)
+                imgs = tf.reshape(imgs, (-1, 100, 100, 3))
+            elif self.augment == 2:
+                imgs = tf.random_crop(imgs, (tf.shape(imgs)[0], 100, 100, 3))
+                imgs = tf.reshape(imgs, (-1, 100, 100, 3))  # shape gets lost above
+
+                def aug(imgs):
+                    imgs = tf.map_fn(lambda img: tf.image.random_flip_left_right(img), imgs)
+                    imgs = tf.map_fn(lambda img: tf.image.random_contrast(img, lower=.75, upper=1.), imgs)
+                    imgs = tf.map_fn(lambda img: tf.image.random_hue(img, .15), imgs)
+                    return imgs
+
+                imgs = tf.cond(self.is_training, lambda: aug(imgs), lambda: imgs)
+
+            if self.add_scaling:
+                mean, std = tf.nn.moments(imgs, axes=[1, 2], keep_dims=True)
+                hidden = (imgs - mean) / tf.sqrt(std)
+            else:
+                hidden = imgs
+
+            self.imgs = imgs
+
+            for layer in self.layers:
+                hidden = layer.apply(hidden, is_training=self.is_training)
+
+            self.predict = {}
+            self.loss_ops = {}
+            self.metrics = {}
+
+            if self.n_class_tasks > 0:
+                self.logits = {}
+                self.probs_p = {}
+                self.accuracy = {}
+                for i in range(self.n_class_tasks):
+                    name = self.task_names[i]
+
+                    with tf.variable_scope(f"class_{name}"):
+                        self.logits[name] = tf.layers.dense(hidden, self.n_classes[i], activation=None, name='logits')
+
+                        self.predict[name] = tf.nn.softmax(self.logits[name], name='predict')
+                        self.loss_ops[name] = tf.losses.sparse_softmax_cross_entropy(self.labels_p[name], self.logits[name], scope='xent')
+
+                        _, self.accuracy[name] = tf.metrics.accuracy(self.labels_p[name], tf.argmax(self.predict[name], 1))
+
+                        self.metrics.update({f'acc_{name}': self.accuracy[name] for name in self.accuracy})
+
+            for i in range(self.n_class_tasks, self.n_class_tasks + self.n_regress_tasks):
+                name = self.task_names[i]
+                with tf.variable_scope(f"regress_{name}"):
+                    self.labels_p[name] = tf.placeholder(tf.float32, shape=None, name='labels_p')
+                    self.predict[name] = tf.layers.dense(hidden, 1, activation=None)
+                    self.loss_ops[name] = tf.losses.mean_squared_error(self.labels_p[name], self.predict[name], scope='mse')
+
+            self.global_step = tf.Variable(0, trainable=False)
+            if self.decay_learning_rate:
+                self.decayed_lr = tf.train.exponential_decay(self.learning_rate, self.global_step,
+                                                             decay_steps=200000 // self.batch_size, decay_rate=0.94)
+                self.optimizer = tf.train.RMSPropOptimizer(self.decayed_lr)  # , epsilon=1)
+            else:
+                self.optimizer = tf.train.AdamOptimizer(self.learning_rate, self.beta1, self.beta2)
+
+            update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+
+            if self.combined_train_op:
+                self.loss_op = tf.add_n(list(self.loss_ops.values()))
+                if self.l2_lambda:
+                    self.loss_op = tf.add(self.loss_op, self.l2_lambda * tf.reduce_sum([tf.nn.l2_loss(var) for var in tf.trainable_variables()]), name='loss')
+
+                with tf.control_dependencies(update_ops):
+                    self.train_op = self.optimizer.minimize(self.loss_op, global_step=self.global_step, name='train_op')
+            else:
+                self.train_op = {}
+                for task in self.loss_ops:
+                    with tf.control_dependencies(update_ops):  # these will be updated regardless of task; shouldn't be task specific?
+                        self.train_op[task]: self.optimizer.minimize(self.loss_ops[task], global_step=self.global_step, name=f"train_op_{task}")
+                assert False
+                # TODO: change train to work with this
+
+            self.early_stop_metric_name = 'acc_default'
+            self.uses_dataset = True
+
+            self.saver = tf.train.Saver()
+            self.global_init = tf.global_variables_initializer()
+            self.local_init = tf.local_variables_initializer()
+
+        self._add_savers_and_writers()
+        self._check_graph()
+
+    def train(self, train_fnames: Sequence[str], dev_fnames: Sequence[str], train_batches_per_epoch: int=100,
+              dev_batches_per_epoch: int=10, n_epochs: int=100, max_patience: int=5, verbose: int=0):
+        """
+        The best epoch is the one where the early stop metric on the dev set is the highest. "best" in reference to other
+        metrics means the value of that metric at the best epoch.
+        :param train_inputs:
+        :param train_labels:
+        :param dev_inputs:
+        :param dev_labels:
+        :param n_epochs:
+        :param max_patience:
+        :param verbose: 3 for tnrange, 2 for trange, 1 for range w/ print, 0 for range
+        :returns: {name: value} of the various metrics at the best epoch; includes train_time and whether training was
+                  completed
+        """
+
+        start_time = time.time()
+
+        if verbose == 3:
+            epoch_range = lambda *args: tnrange(*args, unit='epoch')
+            batch_range = lambda *args: tnrange(*args, unit='batch', leave=False)
+        elif verbose == 2:
+            epoch_range = lambda *args: trange(*args, unit='epoch')
+            batch_range = lambda *args: trange(*args, unit='batch', leave=False)
+        else:
+            epoch_range = range
+            batch_range = range
+
+        train_inputs, dev_inputs = [x if type(x) is dict else {'default': x}
+                                    for x in [train_fnames, dev_fnames]]
+
+        if self._metric_improved(0, 1):  # higher is better; start low
+            best_early_stop_metric = -np.inf
+        else:
+            best_early_stop_metric = np.inf
+
+        patience = max_patience
+
+        metric_names = list(self.metrics.keys())
+        metric_ops = [self.metrics[name] for name in metric_names]+ [self.loss_op]
+
+        epochs = epoch_range(n_epochs)
+        for epoch in epochs:
+            batches = batch_range(train_batches_per_epoch)
+
+            ret = self._batch([self.loss_op, self.train_op], train_inputs, range_=batches,
+                                 is_training=True, dataset=self.uses_dataset)
+            train_loss = np.array(ret)[0, :].mean()
+
+            batches = batch_range(dev_batches_per_epoch)
+            ret = self._batch(metric_ops, dev_inputs, range_=batches, dataset=self.uses_dataset)
+            ret = np.array(ret)
+
+            dev_loss = ret[-1, :].mean()
+            dev_metrics = ret[:-1, -1]  # last values, because metrics are streaming
+            dev_metrics = {metric_names[i]: dev_metrics[i] for i in range(len(metric_names))}
+            dev_metrics.update({'dev_loss': dev_loss})
+            early_stop_metric = dev_metrics[self.early_stop_metric_name]
+
+            if verbose == 1:
+                print(f"Train loss: {train_loss:.3f}; Dev loss: {dev_loss:.3f}. Metrics: {dev_metrics}")
+
+            if self.record:
+                self._add_summaries(epoch, {'loss': train_loss}, dev_metrics)
+
+            if self._metric_improved(best_early_stop_metric, early_stop_metric): # always keep updating the best model
+                train_time = (time.time() - start_time) / 60 # in minutes
+                best_metrics = dev_metrics
+                best_metrics.update({'train_loss': train_loss, 'train_time': train_time, 'train_complete': False})
+                if self.record:
+                    self._log(best_metrics)
+                    self._save()
+
+            if self._metric_improved(best_early_stop_metric, early_stop_metric, significant=True):
+                best_early_stop_metric = early_stop_metric
+                patience = max_patience
+            else:
+                patience -= 1
+                if patience == 0:
+                    break
+
+            runtime = (time.time() - start_time) / 60
+            if verbose > 1:
+                epochs.set_description(
+                    f"Epoch {epoch + 1}. Train Loss: {train_loss:.3f}. Dev loss: {dev_loss:.3f}. Runtime {runtime:.2f}."
+                    f"Time: {runtime}")
+
+        best_metrics['train_complete'] = True
+        if self.record:
+            self._log(best_metrics)
+            self.saver.restore(self.sess, os.path.join(self.log_dir, 'model.ckpt'))  # reload best epoch
+
+        return best_metrics
+
+    @staticmethod
+    def _metric_improved(old_metric: _numeric, new_metric: _numeric, significant: bool = False,
+                         threshold: float = .01) -> bool:
+        """
+        CNN uses accuracy, so an increase is an improvement
+        :param old_metric:
+        :param new_metric:
+        :param significant:
+        :param threshold:
+        :return:
+        """
+
+        if significant:
+            return new_metric > (1 + threshold) * old_metric
+        else:
+            return new_metric > old_metric
+
+    def score(self, inputs, labels):
+        probs = self.predict_proba(inputs)
+        return acc_at_k(1, probs, labels), acc_at_k(5, probs, labels)
+
+    def _parse_example(self, example_proto):
+        features = {
+            'image': tf.FixedLenFeature((), tf.string),
+            'label': tf.FixedLenFeature((), tf.int64),
+            'image_format': tf.FixedLenFeature((), tf.string, default_value='jpg')
+        }
+        example = tf.parse_single_example(example_proto, features)
+        return tf.image.decode_jpeg(example['image']), example['label']
+
+    def _augment_imgs(self, imgs, rotate_angle: int = 10, shear_intensity: float = .15,
+                     width_shift_frac: float = .1,
+                     height_shift_frac: float = .1, width_zoom_frac: float = .85, height_zoom_frac: float = .85,
+                     crop_height: int = 100, crop_width: int = 100) -> np.ndarray:
+        keras_params = dict(row_axis=0, col_axis=1, channel_axis=2, fill_mode='reflect')
+        train = True
+
+        rotate = lambda img: tf.keras.preprocessing.image.random_rotation(img, rotate_angle, **keras_params)
+        shear = lambda img: tf.keras.preprocessing.image.random_shear(img, shear_intensity, **keras_params)
+        # shift = lambda img: tf.keras.preprocessing.image.random_shift(img, width_shift_frac, height_shift_frac, **keras_params)
+        # zoom = lambda img: tf.keras.preprocessing.image.random_zoom(img, (width_zoom_frac, height_zoom_frac), **keras_params)
+
+        img_aug = tflearn.data_augmentation.ImageAugmentation()
+        img_aug.add_random_crop((crop_height, crop_width))
+        if train:
+            img_aug.add_random_flip_leftright()
+
+        if train:
+            aug_imgs = np.zeros_like(imgs)
+            for i in range(len(imgs)):
+                aug_imgs[i] = np.random.choice([rotate, shear])(imgs[i])
+        else:
+            aug_imgs = imgs
+
+        aug_imgs = img_aug.apply(aug_imgs)
+        return np.concatenate(aug_imgs).reshape(-1, crop_height, crop_width, 3)
 
 
 class RLCNN(BaseNN):
@@ -704,7 +1073,7 @@ class RLCNN(BaseNN):
         log_key:                          str = 'default',
         task_names:   Optional[Sequence[str]] = None,
         config:      Optional[tf.ConfigProto] = None,
-        run_num:                          int = -1,
+        model_name:                       str = '',
         batch_size:                       int = 128,
         record:                          bool = True,
         random_state:                     int = 521,
@@ -721,14 +1090,19 @@ class RLCNN(BaseNN):
         add_scaling:                     bool = False,
         decay_learning_rate:             bool = False,
     ):
-        new_run = run_num == -1
-        super().__init__(layers, models_dir, log_key, 0, 0, task_names, config, run_num,
+        load_model = os.path.isdir(f'{models_dir}/{model_name}/')
+        super().__init__(layers, models_dir, log_key, 0, 0, task_names, config, model_name,
                          batch_size, record, random_state, data_params)
 
         param_names = ['img_width', 'img_height', 'n_channels', 'l2_lambda', 'learning_rate', 'beta1', 'beta2', 'add_scaling',
                        'decay_learning_rate', 'n_actions']
 
-        if new_run:
+        if load_model:
+            log = pd.read_hdf(log_fname, log_key)
+            for param in param_names:
+                p = log.loc[model_name, param]
+                self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
+        else:
             self.n_actions           = n_actions
             self.img_height          = img_height
             self.img_width           = img_width
@@ -739,11 +1113,6 @@ class RLCNN(BaseNN):
             self.beta2               = beta2
             self.add_scaling         = add_scaling
             self.decay_learning_rate = decay_learning_rate
-        else:
-            log = pd.read_hdf(log_fname, log_key)
-            for param in param_names:
-                p = log.loc[run_num, param]
-                self.__setattr__(param, p if type(p) != np.float64 else p.astype(np.float32))
 
         self.params.update({param: self.__getattribute__(param) for param in param_names})
 
