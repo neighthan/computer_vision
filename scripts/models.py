@@ -163,7 +163,7 @@ class BaseNN(object):
                 self.summary_op = tf.summary.merge_all()
 
         self.sess = tf.Session(graph=self.graph, config=self.config)
-        
+
         meta_graph_file = os.path.join(self.log_dir, 'model.ckpt.meta')
         if os.path.isfile(meta_graph_file):  # load saved model
             print(f"Loading graph from: {meta_graph_file}.")
@@ -229,9 +229,7 @@ class BaseNN(object):
 
         if dataset:
             self.sess.run(self.data_init_op, self._get_feed_dict(inputs, labels))
-            # if range isn't provided, run until you hit a StopIteration error; this isn't really supported now, though,
-            # so it isn't caught
-            range_ = range_ if range_ is not None else range(int(1e50))
+            range_ = range_ if range_ is not None else range(int(1e50))  # loop until dataset runs out
         else:
             if idx is None:
                 idx = list(range(len(next(iter(inputs.values())))))
@@ -246,19 +244,22 @@ class BaseNN(object):
         if return_all_data:
             ret = [[] for _ in range(len(tensors))]
 
-        for batch in range_:
-            feed_dict = {self.is_training: is_training}
+        try:
+            for batch in range_:
+                feed_dict = {self.is_training: is_training}
 
-            if not dataset:
-                batch_idx = idx[batch * self.batch_size: (batch + 1) * self.batch_size]
-                feed_dict.update({self.inputs_p[name]: inputs[name][batch_idx] for name in inputs})
-                if labels is not None:
-                    feed_dict.update({self.labels_p[name]: labels[name][batch_idx] for name in labels})
+                if not dataset:
+                    batch_idx = idx[batch * self.batch_size: (batch + 1) * self.batch_size]
+                    feed_dict.update({self.inputs_p[name]: inputs[name][batch_idx] for name in inputs})
+                    if labels is not None:
+                        feed_dict.update({self.labels_p[name]: labels[name][batch_idx] for name in labels})
 
-            vals = self.sess.run(tensors, feed_dict)
-            if return_all_data:
-                for i in range(len(tensors)):
-                    ret[i].append(vals[i])
+                vals = self.sess.run(tensors, feed_dict)
+                if return_all_data:
+                    for i in range(len(tensors)):
+                        ret[i].append(vals[i])
+        except tf.errors.OutOfRangeError:
+            pass
 
         if return_all_data:
             return ret
@@ -422,7 +423,7 @@ class BaseNN(object):
         if type(inputs) is not dict:
             inputs = {'default': inputs}
 
-        predictions = self._batch([self.predict[name] for name in self.task_names], inputs, dataset=self.uses_dataset) # pd.DataFrame
+        predictions = self._batch([self.predict[name] for name in self.task_names], inputs, dataset=self.uses_dataset)
         predictions = {name: pd.DataFrame(np.concatenate(predictions[i])) for i, name in enumerate(self.task_names)}
 
         if len(predictions.keys()) == 1 and next(iter(predictions)) == 'default':
@@ -810,15 +811,12 @@ class CNN2(BaseNN):
             self.inputs_p = {'default': tf.placeholder(tf.string, shape=[None], name='filenames')}
             self.dataset = (tf.data.TFRecordDataset(self.inputs_p['default'])
                             .map(self._parse_example)
-                            .repeat()
                             .shuffle(buffer_size=5000)
                             .batch(self.batch_size)
                             )
             self.iterator = self.dataset.make_initializable_iterator()
             imgs, labels = self.iterator.get_next()
-            self.imgs0 = imgs
             imgs = tf.image.convert_image_dtype(tf.reshape(imgs, (-1, self.img_height, self.img_width, self.n_channels)), dtype)
-            self.imgs1 = imgs
             self.labels_p = {'default': labels}
             self.data_init_op = self.iterator.initializer
 
@@ -832,6 +830,10 @@ class CNN2(BaseNN):
                 imgs = tf.reshape(imgs, (-1, 100, 100, 3))  # shape gets lost above
 
                 def aug(imgs):
+                    imgs = tf.contrib.image.rotate(imgs,
+                                                   tf.random_uniform([tf.shape(imgs)[0]],
+                                                                     minval=-4 * np.pi / 180,
+                                                                     maxval=4 * np.pi / 180), interpolation='BILINEAR')
                     imgs = tf.map_fn(lambda img: tf.image.random_flip_left_right(img), imgs)
                     imgs = tf.map_fn(lambda img: tf.image.random_contrast(img, lower=.75, upper=1.), imgs)
                     imgs = tf.map_fn(lambda img: tf.image.random_hue(img, .15), imgs)
@@ -844,8 +846,6 @@ class CNN2(BaseNN):
                 hidden = (imgs - mean) / tf.sqrt(std)
             else:
                 hidden = imgs
-
-            self.imgs = imgs
 
             for layer in self.layers:
                 hidden = layer.apply(hidden, is_training=self.is_training)
@@ -952,14 +952,14 @@ class CNN2(BaseNN):
         patience = max_patience
 
         metric_names = list(self.metrics.keys())
-        metric_ops = [self.metrics[name] for name in metric_names]+ [self.loss_op]
+        metric_ops = [self.metrics[name] for name in metric_names] + [self.loss_op]
 
         epochs = epoch_range(n_epochs)
         for epoch in epochs:
             batches = batch_range(train_batches_per_epoch)
 
             ret = self._batch([self.loss_op, self.train_op], train_inputs, range_=batches,
-                                 is_training=True, dataset=self.uses_dataset)
+                              is_training=True, dataset=self.uses_dataset)
             train_loss = np.array(ret)[0, :].mean()
 
             batches = batch_range(dev_batches_per_epoch)
@@ -972,14 +972,11 @@ class CNN2(BaseNN):
             dev_metrics.update({'dev_loss': dev_loss})
             early_stop_metric = dev_metrics[self.early_stop_metric_name]
 
-            if verbose == 1:
-                print(f"Train loss: {train_loss:.3f}; Dev loss: {dev_loss:.3f}. Metrics: {dev_metrics}")
-
             if self.record:
                 self._add_summaries(epoch, {'loss': train_loss}, dev_metrics)
 
-            if self._metric_improved(best_early_stop_metric, early_stop_metric): # always keep updating the best model
-                train_time = (time.time() - start_time) / 60 # in minutes
+            if self._metric_improved(best_early_stop_metric, early_stop_metric):  # always keep updating the best model
+                train_time = (time.time() - start_time) / 60  # in minutes
                 best_metrics = dev_metrics
                 best_metrics.update({'train_loss': train_loss, 'train_time': train_time, 'train_complete': False})
                 if self.record:
@@ -995,10 +992,11 @@ class CNN2(BaseNN):
                     break
 
             runtime = (time.time() - start_time) / 60
-            if verbose > 1:
+            if verbose == 1:
+                print(f"Train loss: {train_loss:.3f}; Dev loss: {dev_loss:.3f}. Metrics: {dev_metrics}. Runtime: {runtime}")
+            elif verbose > 1:
                 epochs.set_description(
-                    f"Epoch {epoch + 1}. Train Loss: {train_loss:.3f}. Dev loss: {dev_loss:.3f}. Runtime {runtime:.2f}."
-                    f"Time: {runtime}")
+                    f"Epoch {epoch + 1}. Train Loss: {train_loss:.3f}. Dev loss: {dev_loss:.3f}. Runtime {runtime:.2f}.")
 
         best_metrics['train_complete'] = True
         if self.record:
