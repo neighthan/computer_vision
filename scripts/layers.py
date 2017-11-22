@@ -29,7 +29,8 @@ class _Layer(object):
     """
     A layer must have the following attributes:
       - self.params: a dictionary that specifies keyword arguments for the layer
-      - self.batch_norm: a boolean specifying whether to use batch normalization after this layer
+      - self.batch_norm: a string specifying whether to use batch_norm 'before' the weight of this layer, 'after' them,
+                         or '' to have no batch_normalization
       - self.layer: a tensorflow layer function which accepts self.params as kwargs and input as the first positional argument
     or else the layer must override apply (see, e.g., BranchedLayer).
     """
@@ -39,17 +40,22 @@ class _Layer(object):
 
     def apply(self, inputs: tf.Tensor, is_training: tf.Tensor) -> tf.Tensor:
         """
-
         :param inputs:
         :param is_training:
-        :return:
+        :returns:
         """
 
         params = self.params.copy()
         if 'kernel_initializer' in params.keys():
             params['kernel_initializer'] = _initializers[params['kernel_initializer']]()
 
-        if self.batch_norm:
+        return self._apply_with_batch_norm(inputs, params, is_training)
+
+    def _apply_with_batch_norm(self, inputs: tf.Tensor, params: dict, is_training: tf.Tensor) -> tf.Tensor:
+        if self.batch_norm == 'before':
+            output = tf.layers.batch_normalization(inputs, training=is_training)
+            output = self.layer(output, **params)
+        elif self.batch_norm == 'after':
             if 'activation' in params:
                 activation = params.pop('activation')
                 output = self.layer(inputs, activation=None, **params)
@@ -68,7 +74,7 @@ class _Layer(object):
 
 class ConvLayer(_Layer):
     def __init__(self, n_filters:int, kernel_size:_OneOrMore(int), strides: int=1,
-                 activation: str='relu', padding: str='same', batch_norm: bool=True):
+                 activation: str='relu', padding: str='same', batch_norm: str='before'):
         super().__init__()
         self.params.update(dict(
             filters=n_filters,
@@ -86,7 +92,7 @@ class ConvLayer(_Layer):
 
 
 class _PoolLayer(_Layer):
-    def __init__(self, size: _OneOrMore(int), strides: _OneOrMore(int)=1, padding: str='same', batch_norm: bool=False):
+    def __init__(self, size: _OneOrMore(int), strides: _OneOrMore(int)=1, padding: str='same', batch_norm: str=''):
         super().__init__()
         self.params.update(dict(
             pool_size=size,
@@ -109,7 +115,7 @@ class AvgPoolLayer(_PoolLayer):
 
 
 class _GlobalPoolLayer(_Layer):
-    def __init__(self, batch_norm: bool=False):
+    def __init__(self, batch_norm: str=''):
         super().__init__()
         self.params.update(dict(
             strides=1,
@@ -117,15 +123,11 @@ class _GlobalPoolLayer(_Layer):
         ))
         self.batch_norm = batch_norm
 
-    def apply(self, inputs: tf.Tensor, is_training: tf.Tensor):
+    def apply(self, inputs: tf.Tensor, is_training: tf.Tensor) -> tf.Tensor:
         params = self.params.copy()
-        params['pool_size'] = inputs.shape.as_list()[1:3] # height and width
+        params['pool_size'] = inputs.shape.as_list()[1:3]  # height and width
 
-        output = self.layer(inputs, **params)
-
-        if self.batch_norm:
-            output = tf.layers.batch_normalization(output, training=is_training)
-        return output
+        return self._apply_with_batch_norm(inputs, params, is_training)
 
 
 class GlobalAvgPoolLayer(_GlobalPoolLayer):
@@ -177,9 +179,7 @@ class BranchedLayer(_Layer):
         return outputs
 
     def __eq__(self, other):
-        if type(other) is not BranchedLayer:
-            return False
-        return self.layers == other.layers
+        return type(other) == BranchedLayer and self.layers == other.layers
 
     def __repr__(self):
         return "Branched [\n\t{}\n]".format('\n\t'.join([layer.__repr__() for layer in self.layers]))
@@ -208,9 +208,7 @@ class MergeLayer(_Layer):
         return self.layer(flatten(inputs), **self.params)
 
     def __eq__(self, other):
-        if type(other) is not MergeLayer:
-            return False
-        return self.params == other.params
+        return type(other) == MergeLayer and self.params == other.params
 
     def __repr__(self):
         return f"Merge[axis={self.params['axis']}]"
@@ -218,7 +216,7 @@ class MergeLayer(_Layer):
 
 class ResidualLayer(_Layer):
     """
-    Adds two layers element-wise. Does not support projecting to a common shape
+    Adds two layers element-wise. Does not support projecting to a common shape.
     """
 
     def apply(self, inputs: Sequence[tf.Tensor], is_training: Optional[tf.Tensor]=None) -> tf.Tensor:
@@ -231,7 +229,7 @@ class ResidualLayer(_Layer):
         return inputs[0] + inputs[1]
 
     def __eq__(self, other):
-        return type(other) is ResidualLayer
+        return type(other) == ResidualLayer
 
     def __repr__(self):
         return "Residual Layer"
@@ -240,7 +238,7 @@ class ResidualLayer(_Layer):
 class FlattenLayer(_Layer):
     def __init__(self):
         super().__init__()
-        self.batch_norm = False
+        self.batch_norm = ''
 
     @property
     def layer(self):
@@ -248,7 +246,7 @@ class FlattenLayer(_Layer):
 
 
 class DenseLayer(_Layer):
-    def __init__(self, n_units: int, activation: str='relu', batch_norm: bool=True):
+    def __init__(self, n_units: int, activation: str='relu', batch_norm: str='before'):
         super().__init__()
         self.params.update(dict(
             units=n_units,
@@ -262,9 +260,7 @@ class DenseLayer(_Layer):
         return _layers['dense']
 
     def __eq__(self, other):
-        if type(other) is not DenseLayer:
-            return False
-        return self.params == other.params and self.batch_norm == other.batch_norm
+        return type(other) == DenseLayer and self.params == other.params and self.batch_norm == other.batch_norm
 
     def __repr__(self):
         return f"Dense[{self.params['units']}, {self.params['activation'].__name__}]"
@@ -360,9 +356,8 @@ class LSTMLayer(_Layer):
                     return state, output
 
     def __eq__(self, other):
-        if type(other) is not LSTMLayer:
-            return False
-        return self.n_units == other.n_units and self.params == other.params and self.ret == other.ret and self.last_only == other.last_only and self.scope == other.scope
+        return type(other) == LSTMLayer and self.n_units == other.n_units and self.params == other.params \
+               and self.ret == other.ret and self.last_only == other.last_only and self.scope == other.scope
 
     def __repr__(self):
         return f"LSTM[{self.n_units}, {self.params['activation'].__name__}]"
