@@ -41,13 +41,13 @@ def question_to_idx(question: str, pad_to_length: int, vocab) -> list:
 
 def process_objects(objects, max_n_objects: int, object_to_id):
     objects = [[object_to_id[obj[0]], *obj[1:]] for obj in objects]
-    return objects + [[0] * 6] * (max_n_objects - len(objects))
+    return objects + [[0] * len(objects[0])] * (max_n_objects - len(objects))
 
 
-def load_data(splits, add_scene_to_objects: bool = True, embed_object_names: bool = True, use_glove: bool = True,
-              glove_size: int = 100, return_img_paths: bool = True, max_question_length: int = 22,
-              max_n_objects: int = 56, object_limit: int=16,
-              n_pose_ids: int = 10, n_scene_types: int = 2) -> list:
+def load_data(splits, add_scene_to_objects: bool = True, embed_object_names: bool=True, use_glove: bool=True,
+              glove_size: int=100, return_img_paths: bool = True, max_question_length: int=22,
+              max_n_objects: int=56, object_limit: int=16,
+              n_id_field_vals: int=10, n_pose_clusters: int=10, n_scene_types: int=2) -> list:
     """
     There are some potential issues here with, e.g., max_question_length if this value differs between splits.
     Ideally we should compute the max values on train and then crop anything longer than that. As a workaround,
@@ -81,14 +81,18 @@ def load_data(splits, add_scene_to_objects: bool = True, embed_object_names: boo
     tf.reset_default_graph()
     sess = tf.Session(config=config)
 
-    inp = tf.placeholder(tf.int32, (None, max_n_objects, 7))
+    if add_scene_to_objects:
+        inp = tf.placeholder(tf.int32, (None, max_n_objects, 8))
+    else:
+        inp = tf.placeholder(tf.int32, (None, max_n_objects, 7))
 
     flip = tf.one_hot(inp[:, :, 4], 2)
-    pose_id = tf.one_hot(inp[:, :, 5], n_pose_ids)
-    transforms = [flip, pose_id]
+    id_fields = tf.one_hot(inp[:, :, 5], n_id_field_vals)
+    pose_cluster = tf.one_hot(inp[:, :, 6], n_pose_clusters)
+    transforms = [flip, id_fields, pose_cluster]
 
     if add_scene_to_objects:
-        scene_type = tf.one_hot(inp[:, :, 6], n_scene_types)
+        scene_type = tf.one_hot(inp[:, :, 7], n_scene_types)
         transforms.append(scene_type)
 
     if not embed_object_names:
@@ -103,12 +107,10 @@ def load_data(splits, add_scene_to_objects: bool = True, embed_object_names: boo
 
         # convert words and answers to ids
         if use_glove:
-            question_idx = np.array(
-                qa.question.map(lambda question: question_to_idx(question, max_question_length, glove_vecs.index)).tolist())
+            question_idx = np.array(qa.question.map(lambda question: question_to_idx(question, max_question_length, glove_vecs.index)).tolist())
             questions = glove_vecs.loc[question_idx.reshape(-1)].values.reshape(*question_idx.shape, -1)
         else:
-            questions = np.array(
-                qa.question.map(lambda question: question_to_ids(question, max_question_length, word_to_id)).tolist())
+            questions = np.array(qa.question.map(lambda question: question_to_ids(question, max_question_length, word_to_id)).tolist())
 
         if split != 'test':
             unk_val = answer_to_id['<UNK>']
@@ -116,9 +118,8 @@ def load_data(splits, add_scene_to_objects: bool = True, embed_object_names: boo
 
         img_paths = qa.img_path.values
 
-        # 0: name 1: x 2: y 3: z 4: flip 5: poseID 6: scene type, if added below
-        objects = np.array(
-            qa.objects.map(lambda objects: process_objects(objects, max_n_objects, object_to_id)).tolist())
+        # 0: name 1: x 2: y 3: z 4: flip 5: typeID/poseID/expressionID 6: pose cluster 7: scene type, if added below
+        objects = np.array(qa.objects.map(lambda objects: process_objects(objects, max_n_objects, object_to_id)).tolist())
 
         scenes = qa.scene_type.map(scene_to_id.get).values
 
