@@ -148,7 +148,7 @@ def load_data(splits, add_scene_to_objects: bool = True, embed_object_names: boo
 
 def generator(inputs: dict, batch_size: int, split: str, labels: Optional[dict]=None,
               n_imgs_per_file: int=640, n_qa_per_image: int=3, mean=None, std=None, shuffle: bool=True):
-    batch_size = int(np.round(batch_size / n_qa_per_image)) # because we'll load all qa for each image at once
+    batch_size = int(np.round(batch_size / n_qa_per_image))  # because we'll load all qa for each image at once
 
     img_dir = f'/cluster/nhunt/img_features/{split}'
     img_files = [f"{img_dir}/{img}" for img in os.listdir(img_dir)]
@@ -186,7 +186,7 @@ def generator(inputs: dict, batch_size: int, split: str, labels: Optional[dict]=
                 yield batch_inputs
 
 
-def create_predictions_file(model_name: str, models_dir: str, split: str):
+def create_predictions_file(model_name: str, models_dir: str, split: str, use_generator: bool=False, inputs=None):
     """
     Submission requirements (from here: http://visualqa.org/vqa_v1_challenge.html)
     Before uploading your results to the evaluation server, you will need to create a JSON file containing
@@ -198,17 +198,19 @@ def create_predictions_file(model_name: str, models_dir: str, split: str):
     split you are using, and [alg] with your algorithm name. Place the JSON file into a zip file named "results.zip".
     """
 
-    inputs = load_data([split])[0]
-    object_limit = 16  # > 90% of cases covered in train
-    inputs = {key: val[:, :object_limit] if 'object' in key else val for key, val in inputs.items()}
+    inputs = inputs if inputs is not None else load_data([split])[0]
 
     batch_size = 64
     mean = np.load('data/train/mean.npy')
     std = np.load('data/train/std.npy')
-    input_generator = lambda: generator(inputs, batch_size, split, mean=mean, std=std)
 
     model = NN(model_name=model_name, models_dir=models_dir, config=config)
-    predictions = np.concatenate(model._batch(model.predict['default'], generator=input_generator)[0])
+
+    if use_generator:
+        input_generator = lambda: generator(inputs, batch_size, split, mean=mean, std=std)
+        predictions = np.concatenate(model._batch(model.predict['default'], generator=input_generator)[0])
+    else:
+        predictions = np.concatenate(model._batch(model.predict['default'], inputs)[0])
 
     qa = pd.read_hdf(f'data/{split}/qa.h5')
 
