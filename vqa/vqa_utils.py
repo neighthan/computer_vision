@@ -10,6 +10,8 @@ from tf_layers.layers import EmbeddingLayer, ConvLayer, FlattenLayer, LSTMLayer,
     add_implied_layers, DropoutLayer
 from tf_layers.models import NN
 from tf_layers.tf_utils import tf_init
+from computer_vision.vqa.VQA.PythonHelperTools.vqaTools.vqa import VQA
+from computer_vision.vqa.VQA.PythonEvaluationTools.vqaEvaluation.vqaEval import VQAEval
 
 from typing import Optional
 
@@ -44,7 +46,22 @@ def process_objects(objects, max_n_objects: int, object_to_id):
     return objects + [[0] * len(objects[0])] * (max_n_objects - len(objects))
 
 
-def load_data(splits, add_scene_to_objects: bool = True, embed_object_names: bool=True, use_glove: bool=True,
+def objects_to_bag(object_to_id, objects):
+    """
+    Creates a bag of objects for each image
+    :param object_to_id: a dictionary that maps object names to ids and the ids range from 0 to 149
+    :param objects: a list of objects that an image contains
+    :return: a numpy array with each index indicating a type of object and the value being the count
+    """
+    # bag = np.zeros(150)
+    bag = [0] * 150
+    for obj in objects:
+        current_id = object_to_id[obj[0]]
+        bag[current_id] += 1
+    return bag
+
+
+def load_data(splits, add_scene_to_objects: bool = True, embed_object_names: bool=True, use_glove: bool=True, bag_of_objects: bool=False,
               glove_size: int=100, return_img_paths: bool = True, max_question_length: int=22,
               max_n_objects: int=56, object_limit: int=16,
               n_id_field_vals: int=10, n_pose_clusters: int=10, n_scene_types: int=2) -> list:
@@ -136,7 +153,11 @@ def load_data(splits, add_scene_to_objects: bool = True, embed_object_names: boo
         if return_img_paths:
             inputs['img_paths'] = img_paths
 
-        inputs = {key: val[:, :object_limit] if 'object' in key else val for key, val in inputs.items()}
+        # TODO check correctness for a bag objects
+        if bag_of_objects:
+            inputs['global_objects'] = np.array(qa.objects.map(lambda objects: objects_to_bag(object_to_id, objects)).tolist())
+
+        inputs = {key: val[:, :object_limit] if key in ['object_names', 'objects'] else val for key, val in inputs.items()}
 
         all_data.append(inputs)
         if split != 'test':
@@ -186,7 +207,8 @@ def generator(inputs: dict, batch_size: int, split: str, labels: Optional[dict]=
                 yield batch_inputs
 
 
-def create_predictions_file(model_name: str, models_dir: str, split: str, use_generator: bool=False, inputs=None):
+def create_predictions_file(model_name: str, models_dir: str, split: str, question_type: str, use_generator: bool=False,
+                            inputs=None, fname=None):
     """
     Submission requirements (from here: http://visualqa.org/vqa_v1_challenge.html)
     Before uploading your results to the evaluation server, you will need to create a JSON file containing
@@ -196,6 +218,7 @@ def create_predictions_file(model_name: str, models_dir: str, split: str, use_ge
     either "mscoco" or "abstract_v002" depending on whether you are participating in the challenge for real
     images or abstract scenes, [datasubset] with either "test-dev2015" or "test2015" depending on the test
     split you are using, and [alg] with your algorithm name. Place the JSON file into a zip file named "results.zip".
+    :param question_type: one of 'open_ended' or 'multiple_choice'
     """
 
     inputs = inputs if inputs is not None else load_data([split])[0]
@@ -207,29 +230,31 @@ def create_predictions_file(model_name: str, models_dir: str, split: str, use_ge
     model = NN(model_name=model_name, models_dir=models_dir, config=config)
 
     if use_generator:
-        input_generator = lambda: generator(inputs, batch_size, split, mean=mean, std=std)
+        input_generator = lambda: generator(inputs, batch_size, split, mean=mean, std=std, shuffle=False)
         predictions = np.concatenate(model._batch(model.predict['default'], generator=input_generator)[0])
     else:
         predictions = np.concatenate(model._batch(model.predict['default'], inputs)[0])
-
-    qa = pd.read_hdf(f'data/{split}/qa.h5')
 
     with open('data/answer_to_id.pkl', 'rb') as f:
         answer_to_id = pickle.load(f)
     id_to_answer = {val: key for key, val in answer_to_id.items()}
 
-    # 1000 is used for choices that we don't have a class for
-    choices = np.array(qa.choices.map(lambda choices: [answer_to_id.get(choice, 1000) for choice in choices]).tolist())
+    qa = pd.read_hdf(f'data/{split}/qa.h5')
 
-    # ensure that the max value for each row is one of those that are allowed
-    predictions[np.repeat(np.arange(len(predictions)), choices.shape[1]), choices.ravel()] += 2
+    if question_type == 'multiple_choice':
+        # 1000 is used for choices that we don't have a class for
+        choices = np.array(qa.choices.map(lambda choices: [answer_to_id.get(choice, 1000) for choice in choices]).tolist())
+
+        # ensure that the max value for each row is one of those that are allowed
+        predictions[np.repeat(np.arange(len(predictions)), choices.shape[1]), choices.ravel()] += 2
 
     answers = [id_to_answer[pred] for pred in predictions.argmax(axis=1)]
 
     json_answers = [{'answer': answers[i], 'question_id': int(qa.question_id.iloc[i])} for i in range(len(answers))]
 
     alg_name = 'test'
-    with open(f'vqa_MultipleChoice_abstract_v002_{split}2015_{alg_name}_results.json', 'w') as f:
+    fname = fname if fname is not None else f'vqa_MultipleChoice_abstract_v002_{split}2015_{alg_name}_results.json'
+    with open(fname, 'w') as f:
         json.dump(json_answers, f)
 
 
@@ -303,6 +328,8 @@ def memory_module(question_and_facts, attention_n_units: int=256,
     :param question: rank 2
     :param facts: rank 3
     """
+
+    # TODO: add batch norm in here?
 
     question, facts = question_and_facts
 
@@ -420,3 +447,35 @@ def get_layers(n_object_types, max_n_objects, question_embedding_size=150, objec
                 [None, LSTMLayer(question_lstm_size, ret='output', last_only=False, scope='input_fusion')]))
 
     return layers
+
+
+# def resnet50(img, output_layer='resnet_v2_50/block3/unit_6/bottleneck_v2/shortcut/MaxPool:0'):
+#     # Create the model, use the default arg scope to configure the batch norm parameters.
+#     with tf.contrib.slim.arg_scope(resnet_v2.resnet_arg_scope()):
+#         logits, endpoints = resnet_v2.resnet_v2_50(img, num_classes=1001, is_training=False)
+#
+#     return tf.get_default_graph().get_tensor_by_name(output_layer)
+
+
+# def vgg_preprocessing(img):
+#     rgb_means = [123.68, 116.78, 103.94]
+#     return tf.cast(img, tf.float32) - rgb_means
+
+
+def evaluate_model(model_name: str, split: str, inputs: np.ndarray, use_generator: bool=False) -> dict:
+    results_file = 'results.json'
+    answers_file = f'data/{split}/abstract_v002_{split}2015_annotations.json'
+    models_dir = 'models/'
+
+    accuracies = {}
+    for question_type in ['open_ended', 'multiple_choice']:
+        create_predictions_file(model_name, models_dir, split, question_type, inputs=inputs, fname=results_file, use_generator=use_generator)
+        questions_file = f"data/{split}/{'MultipleChoice' if question_type == 'multiple_choice' else 'OpenEnded'}_abstract_v002_{split}2015_questions.json"
+
+        vqa = VQA(answers_file, questions_file)
+        vqa_results = vqa.loadRes(results_file, questions_file)
+        vqa_eval = VQAEval(vqa, vqa_results, n=3)
+
+        vqa_eval.evaluate()
+        accuracies[question_type] = vqa_eval.accuracy
+    return accuracies
